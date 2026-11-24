@@ -748,14 +748,8 @@ fn test_towed_car_result_update_does_not_arm_the_flag() {
 }
 
 #[test]
-fn test_pre_flag_tow_is_only_classified_finished_at_cooldown() {
-    let mut session = two_car_race_session();
-    session.sessions[0].results_positions.push(ResultPosition {
-        car_idx: 0,
-        position: 2,
-        laps_complete: Some(10),
-        ..Default::default()
-    });
+fn test_pre_flag_tow_without_results_is_classified_finished_at_cooldown() {
+    let session = two_car_race_session();
     let state = Mutex::new(DriverEntriesState::default());
 
     compute(
@@ -818,14 +812,62 @@ fn test_pre_flag_tow_is_only_classified_finished_at_cooldown() {
         Some(SessionState::CoolDown),
         &state,
     );
-    assert!(
-        frame
-            .entries
-            .iter()
-            .find(|entry| entry.car_idx == 0)
-            .unwrap()
-            .is_finished
+    let player = frame
+        .entries
+        .iter()
+        .find(|entry| entry.car_idx == 0)
+        .unwrap();
+    assert!(player.is_finished);
+    assert!(!player.is_towed);
+
+    let frame = compute(
+        &flag_out,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::CoolDown),
+        &Mutex::new(DriverEntriesState::default()),
     );
+    let player = frame
+        .entries
+        .iter()
+        .find(|entry| entry.car_idx == 0)
+        .unwrap();
+    assert!(!player.is_finished);
+}
+
+#[test]
+fn test_leader_crossing_on_departure_tick_arms_finish_latch() {
+    let session = two_car_race_session();
+    let state = Mutex::new(DriverEntriesState::default());
+    compute(
+        &trailing_and_leading_frame(11, 12),
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+
+    let mut departed = trailing_and_leading_frame(11, 13);
+    departed.car_idx_track_surface[1] = TrackSurface::NotInWorld;
+    departed.car_idx_lap_dist_pct[1] = -1.0;
+    departed.car_idx_lap[1] = 0;
+    let frame = compute(
+        &departed,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+    let leader = frame
+        .entries
+        .iter()
+        .find(|entry| entry.car_idx == 1)
+        .unwrap();
+    assert!(leader.is_finished);
+    assert!(!leader.is_towed);
 }
 
 #[test]

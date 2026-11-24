@@ -442,7 +442,7 @@ pub fn compute(
 
         let leader_laps = entries
             .iter()
-            .map(|entry| completed_laps_for_finish(entry, &locked_state))
+            .map(|entry| completed_laps_with_departure(entry, &locked_state, car_idx))
             .max()
             .unwrap_or(0);
 
@@ -492,16 +492,7 @@ pub fn compute(
                     .insert(entry.car_idx, entry.laps_completed);
             }
 
-            let mut completed = completed_laps_for_finish(entry, state);
-            // The last live count can record a crossing on the departure tick.
-            if departed_track(entry, state) && !entry.is_retired {
-                let live_completed = car_idx
-                    .car_idx_laps_completed
-                    .get(entry.car_idx as usize)
-                    .copied()
-                    .unwrap_or(completed);
-                completed = completed.max(live_completed);
-            }
+            let completed = completed_laps_with_departure(entry, state, car_idx);
 
             let crossed_the_line = state.laps_at_checkered.as_mut().is_some_and(|laps| {
                 let baseline = laps.entry(entry.car_idx).or_insert(completed);
@@ -511,8 +502,12 @@ pub fn compute(
 
             // A results-only zero completed laps maps to lap one, even for a car
             // that never started. Preserve the cooldown rule for a live lap one.
-            let started =
-                entry.lap > 1 || car_idx.car_idx_lap.get(entry.car_idx as usize) == Some(&1);
+            let started = entry.lap > 1
+                || car_idx.car_idx_lap.get(entry.car_idx as usize) == Some(&1)
+                || state
+                    .last_in_world_laps
+                    .get(&entry.car_idx)
+                    .is_some_and(|&laps| laps > 0);
             let classified = race_has_ended && !entry.is_retired && started;
 
             if crossed_the_line || classified {
@@ -792,6 +787,27 @@ fn completed_laps_for_finish(entry: &DriverEntry, state: &DriverEntriesState) ->
     }
 
     entry.laps_completed
+}
+
+fn completed_laps_with_departure(
+    entry: &DriverEntry,
+    state: &DriverEntriesState,
+    car_idx: &CarIdxFrame,
+) -> i32 {
+    let completed = completed_laps_for_finish(entry, state);
+
+    // The last live count can record a crossing on the departure tick.
+    if departed_track(entry, state) && !entry.is_retired {
+        let live_completed = car_idx
+            .car_idx_laps_completed
+            .get(entry.car_idx as usize)
+            .copied()
+            .unwrap_or(completed);
+
+        return completed.max(live_completed);
+    }
+
+    completed
 }
 
 fn departed_track(entry: &DriverEntry, state: &DriverEntriesState) -> bool {
