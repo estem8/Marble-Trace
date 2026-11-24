@@ -191,6 +191,7 @@ describe('getStandingsGap', () => {
     const overallLeader = makeGapEntry({
       resultsPositionLap: 0,
       resultsPositionTime: 0,
+      livePosition: 1,
     });
     const driver = makeGapEntry({
       resultsPositionLap: 0,
@@ -226,6 +227,24 @@ describe('getStandingsGap', () => {
     );
   });
 
+  it.each([true, false])(
+    'uses F2 for matching result laps when one result time is missing (%s)',
+    (leaderTimeMissing) => {
+      const leader = makeGapEntry({
+        resultsPositionLap: 0,
+        resultsPositionTime: leaderTimeMissing ? null : 5,
+        f2Time: 5,
+      });
+      const driver = makeGapEntry({
+        resultsPositionLap: 0,
+        resultsPositionTime: leaderTimeMissing ? 9 : null,
+        f2Time: 9,
+      });
+
+      expect(getStandingsGap(driver, leader, true, false, 0).value).toBe('4.0');
+    }
+  );
+
   it('uses F2 for both cars when the reference result is missing', () => {
     const classLeader = makeGapEntry({ position: 5, f2Time: 10 });
     const driver = makeGapEntry({
@@ -240,7 +259,7 @@ describe('getStandingsGap', () => {
     expect(getStandingsInterval(driver, classLeader, true).value).toBe('2.0');
   });
 
-  it('accepts zero F2 only for the telemetry leader when ranks diverge', () => {
+  it('uses the live F2 leader when official and live leaders differ', () => {
     const driver = makeGapEntry({ f2Time: 12 });
     const liveLeader = makeGapEntry({
       position: 2,
@@ -250,7 +269,7 @@ describe('getStandingsGap', () => {
     const officialLeader = makeGapEntry({
       position: 1,
       livePosition: 2,
-      f2Time: 0,
+      f2Time: null,
     });
 
     expect(getStandingsGap(driver, liveLeader, true, false, 0).value).toBe(
@@ -260,6 +279,41 @@ describe('getStandingsGap', () => {
       getStandingsGap(driver, officialLeader, true, false, 0).isEmpty
     ).toBe(true);
     expect(getStandingsGap(driver, null, true, false, 0).isEmpty).toBe(true);
+  });
+
+  it.each([0, -1])('ignores an invalid F2 reference of %s', (f2Time) => {
+    const driver = makeGapEntry({ f2Time: 12 });
+    const reference = makeGapEntry({ position: 1, livePosition: 2, f2Time });
+
+    expect(getStandingsGap(driver, reference, true, false, 0).isEmpty).toBe(
+      true
+    );
+  });
+
+  it('uses the live lap gap when results still place the reference behind', () => {
+    const driver = makeGapEntry({ resultsPositionLap: 1 });
+    const reference = makeGapEntry({ resultsPositionLap: 2 });
+
+    expect(getStandingsGap(driver, reference, true, false, 1).value).toBe(
+      '1 L'
+    );
+  });
+
+  it('uses F2 when the results time still places the reference behind', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 5,
+      f2Time: 12,
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 10,
+      f2Time: 8,
+    });
+
+    expect(getStandingsGap(driver, reference, true, false, 0).value).toBe(
+      '4.0'
+    );
   });
 
   it('names the leader instead of leaving a dash', () => {
@@ -306,6 +360,13 @@ describe('getStandingsInterval', () => {
     });
 
     expect(getStandingsInterval(driver, carAhead, true).value).toBe('1 L');
+  });
+
+  it('shows known lap gaps when result times are missing', () => {
+    const carAhead = makeGapEntry({ resultsPositionLap: 2 });
+    const driver = makeGapEntry({ resultsPositionLap: 4 });
+
+    expect(getStandingsInterval(driver, carAhead, true).value).toBe('2 L');
   });
 
   it('is empty, not a leader, for the car with nobody ahead', () => {

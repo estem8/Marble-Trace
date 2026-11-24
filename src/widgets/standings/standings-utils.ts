@@ -615,12 +615,8 @@ export const getStandingsGap = (
   if (
     resLap !== undefined &&
     resLap !== null &&
-    resTime !== undefined &&
-    resTime !== null &&
     leaderLap !== undefined &&
-    leaderLap !== null &&
-    leaderTime !== undefined &&
-    leaderTime !== null
+    leaderLap !== null
   ) {
     const lapsDown = resLap - leaderLap;
 
@@ -628,33 +624,27 @@ export const getStandingsGap = (
       return { value: `${lapsDown} L`, isLeader: false, isEmpty: false };
     }
 
-    // A lapped leader row would make the time difference meaningless — the two
-    // gaps are then measured over a different number of laps.
-    if (lapsDown === 0) {
+    if (lapsDown === 0 && resTime != null && leaderTime != null) {
       const timeDiff = resTime - leaderTime;
 
       if (timeDiff > 0) {
         return { value: timeDiff.toFixed(1), isLeader: false, isEmpty: false };
       }
     }
-
-    // Only the row the caller marked as leader may render as leader. A
-    // non-positive difference here means the reference row is not actually
-    // ahead of this car — showing a second '-' would read as a second leader.
-    return { value: EMPTY_VALUE, isLeader: false, isEmpty: true };
   }
 
-  // Fallback if resultsPosition values are not available (e.g. at the start of a
-  // session). `lapsBehind` is already measured against the leader passed in.
+  // Results can lag behind a live position change. `lapsBehind` is already
+  // measured against the reference row.
   if (lapsBehind >= 1) {
     return { value: `${lapsBehind} L`, isLeader: false, isEmpty: false };
   }
 
-  // Zero F2 is valid for the telemetry leader. Elsewhere it means the
-  // reference gap is unavailable.
   if (
+    driver.f2Time === null ||
     driver.f2Time <= 0 ||
-    (leader.f2Time <= 0 && !(leader.f2Time === 0 && leader.livePosition === 1))
+    leader.f2Time === null ||
+    leader.f2Time < 0 ||
+    (leader.f2Time === 0 && leader.livePosition !== 1)
   ) {
     return { value: EMPTY_VALUE, isLeader: false, isEmpty: true };
   }

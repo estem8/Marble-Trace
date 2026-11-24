@@ -295,7 +295,7 @@ export const DriverRow = observer(
           return (
             <div className={cellClass('laps', styles.cellCenter)}>
               <span className={`${styles.lapsCompleted} ${dimClass}`}>
-                {driver.lap}
+                {driver.lapsCompleted}
               </span>
             </div>
           );
