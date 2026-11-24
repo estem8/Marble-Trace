@@ -299,7 +299,13 @@ pub fn compute(
                 .unwrap_or(TrackSurface::NotInWorld);
             let live_lap = car_idx.car_idx_lap.get(idx).copied().filter(|&lap| lap > 0);
             let result_laps = result.and_then(|position| position.laps_complete);
-            let lap = live_lap.or(result_laps).unwrap_or(0);
+            let lap = live_lap
+                .or_else(|| {
+                    result_laps
+                        .filter(|&laps| laps >= 0)
+                        .map(|laps| laps.saturating_add(1))
+                })
+                .unwrap_or(0);
             let live_lap_time = car_idx
                 .car_idx_last_lap_time
                 .get(idx)
@@ -491,7 +497,7 @@ pub fn compute(
             let departed = departed_track(entry, state);
             // Once the flag is out, a departing finisher can be recorded by
             // results before its live crossing is observed.
-            let completed = if departed {
+            let completed = if departed && !entry.is_retired {
                 entry.laps_completed
             } else {
                 completed_laps_for_finish(entry, state)
@@ -503,17 +509,13 @@ pub fn compute(
                 completed > *baseline
             });
 
-            // A car that leaves the world once the flag is out has finished and
-            // gone: quitting straight off the racing surface looks exactly like a
-            // tow, and its live lap counter is zeroed on the way out, so the
-            // crossing itself may never be observed on any tick. Without this the
-            // finisher who quits is never latched and is towed instead.
-            let left_after_the_flag =
-                state.laps_at_checkered.is_some() && departed && !entry.is_retired && entry.lap > 0;
+            // A results-only zero completed laps maps to lap one, even for a car
+            // that never started. Preserve the cooldown rule for a live lap one.
+            let started =
+                entry.lap > 1 || car_idx.car_idx_lap.get(entry.car_idx as usize) == Some(&1);
+            let classified = race_has_ended && !entry.is_retired && started;
 
-            let classified = race_has_ended && !entry.is_retired && entry.lap > 0;
-
-            if crossed_the_line || left_after_the_flag || classified {
+            if crossed_the_line || classified {
                 state.finished_cars.insert(entry.car_idx);
                 state.towed_cars.remove(&entry.car_idx);
                 entry.is_towed = false;
@@ -751,11 +753,7 @@ fn is_racing(entry: &DriverEntry) -> bool {
 ///
 /// `CarIdxLapCompleted` and `ResultsPositions.LapsComplete` count the same thing,
 /// so the official results stand in without a change of scale the moment the sim
-/// zeroes the live value — which it does for every car that leaves the world. The
-/// lap counter beside it (`CarIdxLap`, the lap being driven) is one higher while
-/// the car is out there and falls back to a *completed* count when it is gone, and
-/// a finish latch comparing the two never fires for a driver who crosses the line
-/// and quits.
+/// zeroes the live value — which it does for every car that leaves the world.
 fn resolve_laps_completed(
     car_idx: &CarIdxFrame,
     idx: usize,

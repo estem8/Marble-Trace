@@ -602,6 +602,7 @@ fn test_out_of_world_car_uses_recorded_completed_laps() {
 
     assert_eq!(frame.entries[0].track_surface, TrackSurface::NotInWorld);
     assert_eq!(frame.entries[0].laps_completed, 13);
+    assert_eq!(frame.entries[0].lap, 14);
 
     session.sessions[0].results_positions[0].laps_complete = Some(0);
     let frame = compute(
@@ -614,6 +615,7 @@ fn test_out_of_world_car_uses_recorded_completed_laps() {
     );
 
     assert_eq!(frame.entries[0].laps_completed, 0);
+    assert_eq!(frame.entries[0].lap, 1);
 }
 
 #[test]
@@ -859,6 +861,11 @@ fn test_post_flag_departure_from_track_finishes_retained_car() {
     departed.car_idx_lap_dist_pct[0] = -1.0;
     departed.car_idx_lap[0] = 0;
     departed.car_idx_laps_completed[0] = 0;
+    session.sessions[0]
+        .results_positions
+        .last_mut()
+        .unwrap()
+        .laps_complete = Some(12);
     let frame = compute(
         &departed,
         &session,
@@ -868,18 +875,17 @@ fn test_post_flag_departure_from_track_finishes_retained_car() {
         &state,
     );
 
-    assert!(
-        frame
-            .entries
-            .iter()
-            .find(|entry| entry.car_idx == 0)
-            .unwrap()
-            .is_finished
-    );
+    let finisher = frame
+        .entries
+        .iter()
+        .find(|entry| entry.car_idx == 0)
+        .unwrap();
+    assert!(finisher.is_finished);
+    assert!(!finisher.is_towed);
 }
 
 #[test]
-fn test_a_car_that_vanishes_under_the_flag_is_finished_not_towed() {
+fn test_a_car_that_vanishes_under_the_flag_without_a_crossing_stays_towed() {
     let session = two_car_race_session();
     let state = Mutex::new(DriverEntriesState::default());
 
@@ -902,9 +908,7 @@ fn test_a_car_that_vanishes_under_the_flag_is_finished_not_towed() {
         &state,
     );
 
-    // He crosses the line and quits inside the same tick, so his lap counter is
-    // never seen to increment: the sim zeroes the live value on the way out and
-    // the frame still reads the lap he was on.
+    // The car leaves before either source records another completed lap.
     let mut car_idx = trailing_and_leading_frame(12, 14);
     car_idx.car_idx_track_surface = vec![TrackSurface::NotInWorld, TrackSurface::OnTrack];
 
@@ -923,8 +927,8 @@ fn test_a_car_that_vanishes_under_the_flag_is_finished_not_towed() {
         .find(|entry| entry.car_idx == 0)
         .unwrap();
 
-    assert!(quitter.is_finished);
-    assert!(!quitter.is_towed);
+    assert!(!quitter.is_finished);
+    assert!(quitter.is_towed);
 }
 
 #[test]
@@ -1104,7 +1108,7 @@ fn test_garaged_car_falls_back_to_results_positions() {
 
     assert_eq!(entry.position, 4);
     assert_eq!(entry.class_position, 2);
-    assert_eq!(entry.lap, 17);
+    assert_eq!(entry.lap, 18);
     assert_eq!(entry.best_lap_time, Some(91.2));
     assert_eq!(entry.last_lap_time, Some(92.4));
     assert!(!entry.is_retired);
