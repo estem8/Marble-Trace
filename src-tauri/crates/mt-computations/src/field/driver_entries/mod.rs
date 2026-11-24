@@ -317,22 +317,20 @@ pub fn compute(
                 .get(idx)
                 .copied()
                 .filter(|&laps| laps >= 0);
+            let completed_lap_matches_result = live_laps_completed
+                .zip(result_laps)
+                .is_some_and(|(live, recorded)| live == recorded);
             let last_lap_time = if track_surface == TrackSurface::NotInWorld {
-                result_lap_time
-                    .or_else(|| live_lap_time.filter(|_| live_laps_completed == result_laps))
+                result_lap_time.or_else(|| live_lap_time.filter(|_| completed_lap_matches_result))
             } else {
                 live_lap_time
             };
-            let last_lap_time_confirmed = result.is_some_and(|position| {
-                live_laps_completed
-                    .zip(position.laps_complete)
-                    .is_some_and(|(live, recorded)| live == recorded)
-                    && live_lap_time
-                        .zip(result_lap_time)
-                        .is_some_and(|(live, recorded)| {
-                            (live - recorded).abs() < RESULT_LAP_TIME_TOLERANCE_S
-                        })
-            });
+            let last_lap_time_confirmed = completed_lap_matches_result
+                && live_lap_time
+                    .zip(result_lap_time)
+                    .is_some_and(|(live, recorded)| {
+                        (live - recorded).abs() < RESULT_LAP_TIME_TOLERANCE_S
+                    });
             DriverEntry {
                 car_idx: driver.car_idx,
                 car_class_id: driver.car_class_id,
@@ -494,14 +492,16 @@ pub fn compute(
                     .insert(entry.car_idx, entry.laps_completed);
             }
 
-            let departed = departed_track(entry, state);
-            // Once the flag is out, a departing finisher can be recorded by
-            // results before its live crossing is observed.
-            let completed = if departed && !entry.is_retired {
-                entry.laps_completed
-            } else {
-                completed_laps_for_finish(entry, state)
-            };
+            let mut completed = completed_laps_for_finish(entry, state);
+            // The last live count can record a crossing on the departure tick.
+            if departed_track(entry, state) && !entry.is_retired {
+                let live_completed = car_idx
+                    .car_idx_laps_completed
+                    .get(entry.car_idx as usize)
+                    .copied()
+                    .unwrap_or(completed);
+                completed = completed.max(live_completed);
+            }
 
             let crossed_the_line = state.laps_at_checkered.as_mut().is_some_and(|laps| {
                 let baseline = laps.entry(entry.car_idx).or_insert(completed);

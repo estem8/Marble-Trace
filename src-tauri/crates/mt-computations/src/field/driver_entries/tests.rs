@@ -829,7 +829,16 @@ fn test_pre_flag_tow_is_only_classified_finished_at_cooldown() {
 }
 
 #[test]
-fn test_post_flag_departure_from_track_finishes_retained_car() {
+fn test_post_flag_departure_with_live_crossing_finishes_retained_car() {
+    assert_post_flag_departure(12, true);
+}
+
+#[test]
+fn test_post_flag_departure_with_results_update_only_stays_towed() {
+    assert_post_flag_departure(0, false);
+}
+
+fn assert_post_flag_departure(live_completed_laps: i32, expected_finished: bool) {
     let mut session = two_car_race_session();
     session.sessions[0].results_positions.push(ResultPosition {
         car_idx: 0,
@@ -860,7 +869,7 @@ fn test_post_flag_departure_from_track_finishes_retained_car() {
     departed.car_idx_track_surface[0] = TrackSurface::NotInWorld;
     departed.car_idx_lap_dist_pct[0] = -1.0;
     departed.car_idx_lap[0] = 0;
-    departed.car_idx_laps_completed[0] = 0;
+    departed.car_idx_laps_completed[0] = live_completed_laps;
     session.sessions[0]
         .results_positions
         .last_mut()
@@ -875,13 +884,13 @@ fn test_post_flag_departure_from_track_finishes_retained_car() {
         &state,
     );
 
-    let finisher = frame
+    let driver = frame
         .entries
         .iter()
         .find(|entry| entry.car_idx == 0)
         .unwrap();
-    assert!(finisher.is_finished);
-    assert!(!finisher.is_towed);
+    assert_eq!(driver.is_finished, expected_finished);
+    assert_eq!(driver.is_towed, !expected_finished);
 }
 
 #[test]
@@ -1112,6 +1121,30 @@ fn test_garaged_car_falls_back_to_results_positions() {
     assert_eq!(entry.best_lap_time, Some(91.2));
     assert_eq!(entry.last_lap_time, Some(92.4));
     assert!(!entry.is_retired);
+}
+
+#[test]
+fn off_world_live_lap_time_requires_matching_completed_lap_counts() {
+    let mut session = race_session();
+    let mut car_idx = garaged_car_idx_frame();
+    car_idx.car_idx_last_lap_time = vec![92.4];
+    car_idx.car_idx_laps_completed.clear();
+    let state = Mutex::new(DriverEntriesState::default());
+    let start_positions = HashMap::new();
+
+    let frame = compute(&car_idx, &session, &start_positions, false, None, &state);
+    assert_eq!(frame.entries[0].last_lap_time, None);
+
+    session.sessions[0].results_positions = vec![ResultPosition {
+        car_idx: 0,
+        position: 1,
+        laps_complete: Some(17),
+        ..Default::default()
+    }];
+    car_idx.car_idx_laps_completed = vec![17];
+
+    let frame = compute(&car_idx, &session, &start_positions, false, None, &state);
+    assert_eq!(frame.entries[0].last_lap_time, Some(92.4));
 }
 
 #[test]
