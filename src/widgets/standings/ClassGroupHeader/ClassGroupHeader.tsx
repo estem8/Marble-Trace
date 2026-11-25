@@ -1,6 +1,6 @@
 import { useWidgetSettings } from '@entities/layout/useWidgetSettings';
 import { observer } from 'mobx-react-lite';
-import { Users } from 'lucide-react';
+import { Gauge, Users } from 'lucide-react';
 
 import { formatIRating } from '@shared/lib/driver';
 
@@ -33,6 +33,7 @@ export const ClassGroupHeader = observer(
     isScrollTarget = false,
   }: ClassGroupHeaderProps) => {
     const settings = useWidgetSettings<StandingsWidgetSettings>('standings');
+    const useIcons = settings.headerChipLabelMode === 'icon';
 
     return (
       <div
@@ -45,7 +46,12 @@ export const ClassGroupHeader = observer(
       >
         <div className={styles.left}>
           {paginationLabel && (
-            <StatChip lead={paginationLabel} leadKind="number" tone="neutral" />
+            <StatChip
+              presentation={settings.headerChipStyle}
+              lead={paginationLabel}
+              leadKind="number"
+              tone="neutral"
+            />
           )}
 
           <span className={styles.className} style={{ color: classColor }}>
@@ -55,12 +61,24 @@ export const ClassGroupHeader = observer(
 
         <div className={styles.pills}>
           {settings.showSOF && (
-            <StatChip lead="SOF" look="reading" tone="accent">
+            <StatChip
+              presentation={settings.headerChipStyle}
+              lead="SOF"
+              labelIcon={useIcons ? Gauge : undefined}
+              look="reading"
+              tone="accent"
+            >
               {formatIRating(classSof, settings.abbreviateSof)}
             </StatChip>
           )}
 
-          <StatChip icon={Users} look="reading" tone="info">
+          <StatChip
+            presentation={settings.headerChipStyle}
+            lead="DRIVERS"
+            labelIcon={useIcons ? Users : undefined}
+            look="reading"
+            tone="info"
+          >
             {totalDrivers}
           </StatChip>
         </div>

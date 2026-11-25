@@ -1,3 +1,4 @@
+import { SESSION_BAR_SETTINGS } from '@entities/session/session-bar-settings';
 import {
   LIC_BADGE_STYLE,
   QUALIFYING_VISIBILITY,
@@ -63,6 +64,8 @@ const COLUMNS = {
   showIRatingChip: bool(true),
   /** Driver's profile country flag, in its own column before the name. */
   showCountryFlag: bool(false),
+  showSpeed: bool(false),
+  showSpeedUnits: bool(true),
   /** Meters or feet along the track to each car, after the gap. */
   showDistance: bool(false),
 } as const;
@@ -72,6 +75,7 @@ export const RELATIVE_COLUMN_KEYS = Object.keys(COLUMNS) as Array<
 >;
 
 export const RELATIVE_SETTINGS = defineSettings('relative', {
+  ...SESSION_BAR_SETTINGS.shape,
   /**
    * Source of the position number in the leftmost column. Row order is always by
    * gap on track — that is what the widget is for — so this affects the number only.

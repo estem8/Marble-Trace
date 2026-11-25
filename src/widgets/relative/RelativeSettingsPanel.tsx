@@ -1,3 +1,4 @@
+import { SessionBarSettingsCards } from '@features/widget-settings/panels/SessionBarSettingsCards';
 import { observer } from 'mobx-react-lite';
 import { useTranslation } from 'react-i18next';
 import { Slider } from 'antd';
@@ -30,6 +31,7 @@ const COLUMN_TOGGLES: Record<
   sr: 'showLicBadge',
   ir: 'showIRating',
   gap: 'showGap',
+  speed: 'showSpeed',
   distance: 'showDistance',
 };
 const { nameColumnWidth } = RELATIVE_SETTINGS.shape;
@@ -74,6 +76,10 @@ export const RelativeSettingsPanel = observer(() => {
         <Row setting="showIRatingChip" disabled={!settings.showIRating} />
       </Card>
 
+      <Card title={t('settingsPanels.common.speedCard')}>
+        <Row setting="showSpeedUnits" disabled={!settings.showSpeed} />
+      </Card>
+
       <Card title={t('settingsPanels.common.positions')}>
         <div className={styles.fieldGroup}>
           <Row setting="useLivePositions" />
@@ -85,6 +91,8 @@ export const RelativeSettingsPanel = observer(() => {
           <Row setting="paceCarShowInPits" />
         </div>
       </Card>
+
+      <SessionBarSettingsCards />
 
       <Card group="display">
         <div className={styles.fieldGroup}>

@@ -2,13 +2,10 @@ import type { CSSProperties, ReactNode } from 'react';
 import { observer } from 'mobx-react-lite';
 import type { LucideIcon } from 'lucide-react';
 
+import type { StatChipPresentation } from '@shared/contracts/widget-choices';
 import styles from './StatChip.module.scss';
 import { cx } from '@shared/lib/class-names';
 
-/**
- * The chip's color. A caller with a color of its own — a license class, a pit
- * state — sets the chip's variables through `className` instead.
- */
 export type StatChipTone =
   | 'accent'
   | 'positive'
@@ -63,7 +60,6 @@ const LOOK_CLASS: Record<StatChipLook, string> = {
   vivid: '',
 };
 
-/** The looks whose label is filled. */
 const FILLED_LOOKS: ReadonlySet<StatChipLook> = new Set([
   'reading',
   'state',
@@ -73,7 +69,6 @@ const FILLED_LOOKS: ReadonlySet<StatChipLook> = new Set([
 /** The filled looks that drop their frame when the label is all they hold. */
 const UNFRAMED_ALONE: ReadonlySet<StatChipLook> = new Set(['state', 'vivid']);
 
-/** A word set as a label, or a number set in the mono face. */
 export type StatChipLeadKind = 'label' | 'number';
 
 /**
@@ -174,7 +169,10 @@ export const clearStatChip = (element: HTMLElement): void => {
 const ICON_SIZE_PX = 12;
 
 interface StatChipProps {
+  presentation?: StatChipPresentation;
   icon?: LucideIcon;
+  /** Replaces the visible lead with an icon, keeping the string as its name. */
+  labelIcon?: LucideIcon;
   /** The lead part: a label, a status, a rating. */
   lead?: ReactNode;
   leadKind?: StatChipLeadKind;
@@ -197,18 +195,15 @@ interface StatChipProps {
   className?: string;
 }
 
-/**
- * A reading as a lead in its color and a value on the chip's dark ground. A
- * rating, a pit badge and a header reading all take this shape, so a value
- * reads the same wherever it sits.
- */
 export const StatChip = observer(
   ({
-    icon: Icon,
+    icon,
+    labelIcon,
     lead,
     leadKind = 'label',
     look = 'plain',
     size = 'sm',
+    presentation = 'semantic',
     children,
     limit,
     valueChars,
@@ -217,8 +212,9 @@ export const StatChip = observer(
     valueDanger = false,
     className,
   }: StatChipProps) => {
+    const semantic = presentation === 'semantic';
     const toneStyle =
-      toneColor === undefined
+      !semantic || toneColor === undefined
         ? undefined
         : ({ '--chip-data': toneColor } as CSSProperties);
 
@@ -229,19 +225,28 @@ export const StatChip = observer(
           ? ''
           : TONE_CLASS[tone];
 
+    const Icon = labelIcon ?? icon;
+    const iconLabel = labelIcon && typeof lead === 'string' ? lead : undefined;
     const hasLead = Icon !== undefined || lead !== undefined;
     const hasValue = children !== undefined;
-    const isFilled = FILLED_LOOKS.has(look);
+    const isFilled = semantic && FILLED_LOOKS.has(look);
+    const presentationClass = semantic
+      ? toneClass
+      : presentation === 'text'
+        ? styles.text
+        : styles.neutral;
 
     return (
       <span
         className={cx(
           styles.chip,
           hasValue ? '' : styles.chipSingle,
-          !hasValue && UNFRAMED_ALONE.has(look) ? styles.chipSolid : '',
+          semantic && !hasValue && UNFRAMED_ALONE.has(look)
+            ? styles.chipSolid
+            : '',
           SIZE_CLASS[size],
-          toneClass,
-          LOOK_CLASS[look],
+          presentationClass,
+          semantic ? LOOK_CLASS[look] : '',
           className ?? ''
         )}
         style={toneStyle}
@@ -253,9 +258,17 @@ export const StatChip = observer(
               leadKind === 'label' ? styles.leadLabel : styles.leadNumber,
               isFilled ? styles.leadSolid : ''
             )}
+            title={iconLabel}
           >
-            {Icon && <Icon size={ICON_SIZE_PX} className={styles.icon} />}
-            {lead !== undefined && (
+            {Icon && (
+              <Icon
+                size={ICON_SIZE_PX}
+                className={styles.icon}
+                aria-label={iconLabel}
+                aria-hidden={!iconLabel}
+              />
+            )}
+            {!labelIcon && lead !== undefined && (
               <span className={styles.leadText}>{lead}</span>
             )}
           </span>
@@ -266,7 +279,7 @@ export const StatChip = observer(
             {/* Only the count turns red; its limit keeps the value's white. */}
             <span
               className={cx(
-                valueDanger ? styles.valueDanger : '',
+                semantic && valueDanger ? styles.valueDanger : '',
                 valueChars === undefined ? '' : styles.valueFixed
               )}
               style={

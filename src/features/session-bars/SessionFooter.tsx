@@ -1,8 +1,16 @@
-import { useWidgetSettings } from '@entities/layout/useWidgetSettings';
 import { observer } from 'mobx-react-lite';
+import {
+  Flag,
+  Road,
+  ThermometerSun,
+  Timer,
+  TrafficCone,
+  TriangleAlert,
+  Wind,
+} from 'lucide-react';
 
 import { formatTemp, tempUnit } from '@shared/lib/telemetry-format';
-import { parseWeekendTemp } from '@widgets/standings/standings-utils';
+import { parseWeekendTemp } from './session-bars-format';
 import { getTrackWetnessInfo } from '@shared/lib/weather-utils';
 import {
   getIncidentPenaltyStatus,
@@ -16,27 +24,32 @@ import { useBackendComputedStore } from '@entities/cars/computed-context';
 import { useEnvironmentStore } from '@entities/environment/environment-context';
 import { useSessionStore } from '@entities/session/session-context';
 import { useUnitsStore } from '@entities/app-settings/units-context';
-import type { StandingsWidgetSettings } from '../settings-schema';
+import type { SessionBarSettings } from '@entities/session/session-bar-settings';
+
+interface SessionFooterProps {
+  settings: SessionBarSettings;
+}
 
 /**
  * The strip under the rows: track conditions at the left, the player's own
  * counts at the right, each a chip in the shape the rows use.
  */
-export const SessionFooter = observer(() => {
+export const SessionFooter = observer(({ settings }: SessionFooterProps) => {
+  const {
+    footerChipStyle: chipStyle,
+    footerChipLabelMode,
+    showAirTemp,
+    showTrackTemp,
+    showTrackWetness,
+    showPitStops,
+    showIncidentsBadge: showIncidents,
+    showPenalties,
+  } = settings;
+  const useIcons = footerChipLabelMode === 'icon';
   const { pitStops, driverIdentities } = useBackendComputedStore();
   const { sessionInfo } = useSessionStore();
   const { environment } = useEnvironmentStore();
   const { unitSystem } = useUnitsStore();
-
-  const settings = useWidgetSettings<StandingsWidgetSettings>('standings');
-
-  const showWeather = settings.showWeather;
-  const showPitStops = settings.showPitStops;
-  const showIncidents = settings.showIncidentsBadge;
-
-  if (!showWeather && !showPitStops && !showIncidents) {
-    return null;
-  }
 
   const playerIncidents =
     driverIdentities.find((entry) => entry.isPlayer)?.incidents ?? 0;
@@ -71,23 +84,52 @@ export const SessionFooter = observer(() => {
 
   const wetnessInfo = getTrackWetnessInfo(environment?.trackWetness);
 
+  if (
+    !(showAirTemp && airCelsius !== null) &&
+    !(showTrackTemp && trkCelsius !== null) &&
+    !(showTrackWetness && wetnessInfo) &&
+    !showPitStops &&
+    !showIncidents &&
+    !(showPenalties && penaltyStatus)
+  ) {
+    return null;
+  }
+
   return (
     <div className={styles.sessionFooter}>
       <div className={styles.footerGroup}>
-        {showWeather && airCelsius !== null && (
-          <StatChip tone="accent" lead="AIR" look="reading">
+        {showAirTemp && airCelsius !== null && (
+          <StatChip
+            presentation={chipStyle}
+            tone="accent"
+            lead="AIR"
+            labelIcon={useIcons ? Wind : undefined}
+            look="reading"
+          >
             {`${formatTemp(airCelsius, unitSystem)}${tUnit}`}
           </StatChip>
         )}
 
-        {showWeather && trkCelsius !== null && (
-          <StatChip tone="info" lead="TRACK" look="reading">
+        {showTrackTemp && trkCelsius !== null && (
+          <StatChip
+            presentation={chipStyle}
+            tone="info"
+            lead="TRACK"
+            labelIcon={useIcons ? ThermometerSun : undefined}
+            look="reading"
+          >
             {`${formatTemp(trkCelsius, unitSystem)}${tUnit}`}
           </StatChip>
         )}
 
-        {showWeather && wetnessInfo && (
-          <StatChip tone="accent" lead="SURFACE" look="reading">
+        {showTrackWetness && wetnessInfo && (
+          <StatChip
+            presentation={chipStyle}
+            tone="accent"
+            lead="SURFACE"
+            labelIcon={useIcons ? Road : undefined}
+            look="reading"
+          >
             {wetnessInfo.label}
           </StatChip>
         )}
@@ -95,16 +137,24 @@ export const SessionFooter = observer(() => {
 
       <div className={styles.footerGroup}>
         {showPitStops && (
-          <StatChip lead="PIT" look="reading" tone="accent">
+          <StatChip
+            presentation={chipStyle}
+            lead="PIT"
+            labelIcon={useIcons ? TrafficCone : undefined}
+            look="reading"
+            tone="accent"
+          >
             {playerPitStops}
           </StatChip>
         )}
 
         {showIncidents && (
           <StatChip
+            presentation={isNearLimit ? 'semantic' : chipStyle}
             look="reading"
             tone={isNearLimit ? 'danger' : 'accent'}
             lead="INC"
+            labelIcon={useIcons ? TriangleAlert : undefined}
             limit={incidentLimit ?? undefined}
             valueDanger={isNearLimit}
           >
@@ -112,19 +162,27 @@ export const SessionFooter = observer(() => {
           </StatChip>
         )}
 
-        {showIncidents && incidentsToPenalty !== null && (
+        {showPenalties && incidentsToPenalty !== null && (
           <StatChip
+            presentation={isNearPenalty ? 'semantic' : chipStyle}
             look="reading"
             tone={isNearPenalty ? 'danger' : 'accent'}
             lead="TO PEN"
+            labelIcon={useIcons ? Timer : undefined}
             valueDanger={isNearPenalty}
           >
             {incidentsToPenalty}
           </StatChip>
         )}
 
-        {showIncidents && penaltyStatus && (
-          <StatChip lead="PEN" look="reading" tone="accent">
+        {showPenalties && penaltyStatus && (
+          <StatChip
+            presentation={chipStyle}
+            lead="PEN"
+            labelIcon={useIcons ? Flag : undefined}
+            look="reading"
+            tone="accent"
+          >
             {penaltyStatus.served}
           </StatChip>
         )}

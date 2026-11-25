@@ -72,6 +72,7 @@
   },
   "updateBanner": {
     "downloading": "Aktualisierung wird heruntergeladen …",
+    "installing": "Aktualisierung wird installiert …",
     "ready": "Aktualisierung heruntergeladen. Neustart …",
     "available": "Version v{{version}} ist verfügbar",
     "updateAndRestart": "Aktualisieren und neu starten"
@@ -175,7 +176,8 @@
     "unavailable": "In dieser Simulation nicht verfügbar"
   },
   "overlayCanvas": {
-    "exitEditMode": "Bearbeitungsmodus beenden",
+    "finishEditing": "Bearbeitung abschließen",
+    "switchLayout": "Layout wechseln",
     "interactMode": "Interaktionsmodus",
     "interactModeHold": "Interaktionsmodus — {{key}} zum Beenden loslassen",
     "interactModeToggle": "Interaktionsmodus — {{key}} zum Beenden",
