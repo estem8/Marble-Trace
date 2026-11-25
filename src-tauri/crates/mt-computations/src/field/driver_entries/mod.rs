@@ -150,7 +150,7 @@ pub struct DriverEntriesState {
     /// the finish latch compares against once the checkered flag comes out. Laps
     /// *completed*, not the lap being driven — see `resolve_laps_completed`.
     pub previous_laps: HashMap<i32, i32>,
-    /// Last completed-lap count observed while each car was in the world.
+    /// Last completed-lap count observed in the world or on the departure tick.
     pub last_in_world_laps: HashMap<i32, i32>,
     /// Completed-lap counts snapshotted when the checkered flag came out. `None`
     /// while the race is still running.
@@ -418,7 +418,15 @@ fn compute_with_clock(
                 live_class_position: 0,
                 start_pos_overall: start_overall,
                 start_pos_class: start_class,
-                laps_completed: resolve_laps_completed(car_idx, idx, result),
+                laps_completed: resolve_laps_completed(
+                    live_laps_completed,
+                    result_laps,
+                    locked_state
+                        .last_in_world_laps
+                        .get(&driver.car_idx)
+                        .copied(),
+                    track_surface,
+                ),
                 lap,
                 lap_dist_pct: car_idx
                     .car_idx_lap_dist_pct
@@ -475,6 +483,30 @@ fn compute_with_clock(
     entries.sort_by_key(official_sort_key);
     update_tow_states(&mut entries, &mut locked_state);
 
+    for entry in &mut entries {
+        if entry.track_surface != TrackSurface::NotInWorld {
+            locked_state
+                .last_in_world_laps
+                .insert(entry.car_idx, entry.laps_completed);
+        } else if departed_track(entry, &locked_state) && !entry.is_retired {
+            // The live count can include a crossing on the departure tick.
+            let live_completed = car_idx
+                .car_idx_laps_completed
+                .get(entry.car_idx as usize)
+                .copied()
+                .filter(|laps| *laps > 0);
+
+            if let Some(live_completed) = live_completed {
+                let retained = locked_state
+                    .last_in_world_laps
+                    .entry(entry.car_idx)
+                    .or_default();
+                *retained = (*retained).max(live_completed);
+                entry.laps_completed = entry.laps_completed.max(*retained);
+            }
+        }
+    }
+
     // Finish latch. A car has finished once it crosses the line after the flag came
     // out, which the lap counter records against a baseline snapshotted from the tick
     // before. Whatever is left over is classified when the race ends (`CoolDown`).
@@ -505,7 +537,7 @@ fn compute_with_clock(
 
         let leader_laps = entries
             .iter()
-            .map(|entry| completed_laps_with_departure(entry, &locked_state, car_idx))
+            .map(|entry| completed_laps_for_finish(entry, &locked_state))
             .max()
             .unwrap_or(0);
 
@@ -545,18 +577,9 @@ fn compute_with_clock(
         let state = &mut *locked_state;
 
         for entry in &mut entries {
-            // A car missing from the snapshot was not in the field when the flag
-            // came out (it joined, rejoined, or this is the first tick after a
-            // reconnect). Seed its baseline with the lap it has right now, so it
-            // can still latch on its next crossing instead of never at all.
-            if entry.track_surface != TrackSurface::NotInWorld {
-                state
-                    .last_in_world_laps
-                    .insert(entry.car_idx, entry.laps_completed);
-            }
+            let completed = completed_laps_for_finish(entry, state);
 
-            let completed = completed_laps_with_departure(entry, state, car_idx);
-
+            // Seed a late arrival from its first observed lap.
             let crossed_the_line = state.laps_at_checkered.as_mut().is_some_and(|laps| {
                 let baseline = laps.entry(entry.car_idx).or_insert(completed);
 
@@ -873,29 +896,16 @@ fn is_racing(entry: &DriverEntry) -> bool {
 /// happens after the flag is not a race incident.
 /// Laps a car has actually completed.
 ///
-/// `CarIdxLapCompleted` and `ResultsPositions.LapsComplete` count the same thing,
-/// so the official results stand in without a change of scale the moment the sim
-/// zeroes the live value — which it does for every car that leaves the world.
+/// Results and live telemetry use the same completed-lap count. Once the car
+/// leaves the world, an older result cannot replace the last observed count.
 fn resolve_laps_completed(
-    car_idx: &CarIdxFrame,
-    idx: usize,
-    result: Option<&ResultPosition>,
+    live_laps: Option<i32>,
+    result_laps: Option<i32>,
+    retained_laps: Option<i32>,
+    track_surface: TrackSurface,
 ) -> i32 {
-    let live_laps = car_idx
-        .car_idx_laps_completed
-        .get(idx)
-        .copied()
-        .filter(|&laps| laps >= 0);
-    let result_laps = result.and_then(|position| position.laps_complete);
-    let track_surface = car_idx
-        .car_idx_track_surface
-        .get(idx)
-        .copied()
-        .unwrap_or(TrackSurface::NotInWorld);
-    let is_out_of_world = track_surface == TrackSurface::NotInWorld;
-
-    if is_out_of_world {
-        result_laps.or(live_laps).unwrap_or(0)
+    if track_surface == TrackSurface::NotInWorld {
+        result_laps.max(retained_laps).or(live_laps).unwrap_or(0)
     } else {
         live_laps.or(result_laps).unwrap_or(0)
     }
@@ -914,27 +924,6 @@ fn completed_laps_for_finish(entry: &DriverEntry, state: &DriverEntriesState) ->
     }
 
     entry.laps_completed
-}
-
-fn completed_laps_with_departure(
-    entry: &DriverEntry,
-    state: &DriverEntriesState,
-    car_idx: &CarIdxFrame,
-) -> i32 {
-    let completed = completed_laps_for_finish(entry, state);
-
-    // The last live count can record a crossing on the departure tick.
-    if departed_track(entry, state) && !entry.is_retired {
-        let live_completed = car_idx
-            .car_idx_laps_completed
-            .get(entry.car_idx as usize)
-            .copied()
-            .unwrap_or(completed);
-
-        return completed.max(live_completed);
-    }
-
-    completed
 }
 
 fn departed_track(entry: &DriverEntry, state: &DriverEntriesState) -> bool {

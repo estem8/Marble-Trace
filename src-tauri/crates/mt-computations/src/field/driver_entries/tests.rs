@@ -930,15 +930,26 @@ fn test_leader_crossing_on_departure_tick_arms_finish_latch() {
 
 #[test]
 fn test_post_flag_departure_with_live_crossing_finishes_retained_car() {
-    assert_post_flag_departure(12, true);
+    assert_post_flag_departure(12, Some(11), true, 12);
 }
 
 #[test]
 fn test_post_flag_departure_with_results_update_only_stays_towed() {
-    assert_post_flag_departure(0, false);
+    assert_post_flag_departure(0, Some(12), false, 12);
 }
 
-fn assert_post_flag_departure(live_completed_laps: i32, expected_finished: bool) {
+#[test]
+fn test_post_flag_departure_with_cleared_lap_count_keeps_last_live_count() {
+    assert_post_flag_departure(0, None, false, 11);
+    assert_post_flag_departure(0, Some(10), false, 11);
+}
+
+fn assert_post_flag_departure(
+    live_completed_laps: i32,
+    result_laps: Option<i32>,
+    expected_finished: bool,
+    expected_laps_completed: i32,
+) {
     let mut session = two_car_race_session();
     session.sessions[0].results_positions.push(ResultPosition {
         car_idx: 0,
@@ -974,7 +985,7 @@ fn assert_post_flag_departure(live_completed_laps: i32, expected_finished: bool)
         .results_positions
         .last_mut()
         .unwrap()
-        .laps_complete = Some(12);
+        .laps_complete = result_laps;
     let frame = compute(
         &departed,
         &session,
@@ -991,6 +1002,35 @@ fn assert_post_flag_departure(live_completed_laps: i32, expected_finished: bool)
         .unwrap();
     assert_eq!(driver.is_finished, expected_finished);
     assert_eq!(driver.is_towed, !expected_finished);
+    assert_eq!(driver.laps_completed, expected_laps_completed);
+
+    departed.car_idx_laps_completed[0] = 0;
+    let next = compute(
+        &departed,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+    let driver = player_entry(&next);
+    assert_eq!(driver.laps_completed, expected_laps_completed);
+    assert_eq!(driver.is_finished, expected_finished);
+
+    session.sessions.push(session.sessions[0].clone());
+    session.current_session_num = 1;
+    let reset = compute(
+        &departed,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Racing),
+        &state,
+    );
+    assert_eq!(
+        player_entry(&reset).laps_completed,
+        result_laps.unwrap_or(0)
+    );
 }
 
 #[test]
