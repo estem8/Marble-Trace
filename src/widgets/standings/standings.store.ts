@@ -177,6 +177,13 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
     return this.settings.useLivePositions;
   }
 
+  get useLiveTiming(): boolean {
+    return (
+      this.useTrackOrder &&
+      hasRaceStarted(this.root.session.session?.session_state ?? null)
+    );
+  }
+
   /** This instance's own settings — two tables may rank and filter differently. */
   get settings(): StandingsWidgetSettings {
     return this.root.liveWidgets.getSettings<StandingsWidgetSettings>(
@@ -211,7 +218,7 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
   private trackLapDeltas(entries: CarIdentity[]) {
     for (const entry of entries) {
       const seen = this.seenLapTimes.get(entry.carIdx);
-      const lapIdentifier = entry.resultsPositionLap ?? entry.lapsCompleted;
+      const lapIdentifier = entry.lapsCompleted;
 
       // The completed-lap count can fall back to older results when a car leaves.
       if (seen && lapIdentifier < seen.lap) {

@@ -138,6 +138,7 @@ pub fn parse_session(yaml: &str) -> Option<ParsedSession> {
                 session_type: session_context(&raw_label),
                 session_type_label: raw_label,
                 session_laps: raw_session.session_laps.unwrap_or_default(),
+                results_official: raw_session.results_official.map(|value| value == 1),
                 results_positions: raw_session
                     .results_positions
                     .unwrap_or_default()
@@ -439,6 +440,7 @@ struct RawSessionEntry {
     session_type: Option<String>,
     session_laps: Option<String>,
     results_positions: Option<Vec<RawResultPosition>>,
+    results_official: Option<i32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -595,6 +597,7 @@ SessionInfo:
  - SessionNum: 1
    SessionType: Race
    SessionLaps: 20
+   ResultsOfficial: 1
    ResultsPositions:
    - Position: 1
      CarIdx: 7
@@ -709,6 +712,7 @@ QualifyResultsInfo:
         assert_eq!(snapshot.sessions[1].session_type, SessionType::Race);
         assert_eq!(snapshot.sessions[1].session_type_label, "Race");
         assert_eq!(snapshot.sessions[1].session_laps, "20");
+        assert_eq!(snapshot.sessions[1].results_official, Some(true));
         assert_eq!(snapshot.sessions[1].results_positions.len(), 2);
         assert_eq!(snapshot.sessions[1].results_positions[0].car_idx, 7);
         assert_eq!(snapshot.player_car_idx, 3);

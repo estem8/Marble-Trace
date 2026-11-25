@@ -315,6 +315,96 @@ describe('getStandingsGap', () => {
     );
   });
 
+  it('uses live progress over a stale results lap gap across the line', () => {
+    const driver = makeGapEntry({
+      lap: 10,
+      lapDistPct: 0.98,
+      estTime: 98,
+      classEstLapTime: 100,
+      resultsPositionLap: 1,
+    });
+    const reference = makeGapEntry({
+      lap: 11,
+      lapDistPct: 0.02,
+      estTime: 1.6,
+      classEstLapTime: 80,
+      resultsPositionLap: 0,
+    });
+
+    expect(getStandingsInterval(driver, reference, true, true).value).toBe(
+      '4.0'
+    );
+    expect(getStandingsInterval(driver, reference, true).value).toBe('1 L');
+    expect(
+      getStandingsInterval({ ...driver, estTime: 0 }, reference, true, true)
+        .isEmpty
+    ).toBe(true);
+  });
+
+  it('does not show an interval to a car already behind in live progress', () => {
+    const driver = makeGapEntry({
+      lap: 10,
+      lapDistPct: 0.5,
+      f2Time: 12,
+    });
+    const reference = makeGapEntry({
+      lap: 10,
+      lapDistPct: 0.4,
+      f2Time: 8,
+    });
+
+    expect(getStandingsInterval(driver, reference, true, true).isEmpty).toBe(
+      true
+    );
+  });
+
+  it('keeps the crossing gap until both official times are available', () => {
+    const driver = makeGapEntry({
+      f2Time: 130,
+      resultsPositionLap: 4,
+      finishTiming: { lapsCompleted: 40, crossingTime: 103.2, officialGap: 5 },
+    });
+    const reference = makeGapEntry({
+      f2Time: 20,
+      resultsPositionLap: 1,
+      finishTiming: { lapsCompleted: 40, crossingTime: 100, officialGap: null },
+    });
+
+    expect(getStandingsInterval(driver, reference, true, true).value).toBe(
+      '3.2'
+    );
+    expect(
+      getStandingsInterval(
+        driver,
+        {
+          ...reference,
+          finishTiming: {
+            lapsCompleted: 40,
+            crossingTime: 100,
+            officialGap: 2,
+          },
+        },
+        true,
+        true
+      ).value
+    ).toBe('3.0');
+    expect(
+      getStandingsInterval(
+        driver,
+        {
+          ...reference,
+          finishTiming: {
+            lapsCompleted: 41,
+            crossingTime: 100,
+            officialGap: 2,
+          },
+        },
+        true,
+        true
+      ).value
+    ).toBe('1 L');
+  });
+
   it('names the leader instead of leaving a dash', () => {
     const leader = makeGapEntry({});
 

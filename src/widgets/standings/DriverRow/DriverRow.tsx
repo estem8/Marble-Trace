@@ -142,7 +142,8 @@ export const DriverRow = observer(
           liveLeader,
           isRaceSession,
           leads,
-          calculateLapsBehind(liveLeader, liveDriver)
+          calculateLapsBehind(liveLeader, liveDriver),
+          standingsWidget.useLiveTiming
         );
 
         scheduleWrite(() =>
@@ -170,7 +171,8 @@ export const DriverRow = observer(
         const intervalInfo = getStandingsInterval(
           liveDriver,
           liveAhead,
-          session.currentSessionType === 'Race'
+          session.currentSessionType === 'Race',
+          standingsWidget.useLiveTiming
         );
 
         scheduleWrite(() =>

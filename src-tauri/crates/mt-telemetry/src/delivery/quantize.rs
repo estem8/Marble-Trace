@@ -179,6 +179,9 @@ fn driver_entry(entry: &mut DriverEntry) {
     round_opt(&mut entry.qualify_time, LAP_TIME_DP);
     entry.class_est_lap_time = round(entry.class_est_lap_time, LAP_TIME_DP);
     round_opt(&mut entry.results_position_time, LAP_TIME_DP);
+    if let Some(timing) = &mut entry.finish_timing {
+        round_opt(&mut timing.official_gap, LAP_TIME_DP);
+    }
     round_opt(&mut entry.speed, SPEED_DP);
     round_opt(&mut entry.pit_elapsed_s, GAP_DP);
     round_opt(&mut entry.last_pit_s, GAP_DP);

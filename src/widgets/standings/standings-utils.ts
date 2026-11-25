@@ -544,6 +544,121 @@ export const formatLapDelta = (delta: number | undefined): LapDeltaDisplay => {
   return { value: rounded.toFixed(LAP_DELTA_DECIMALS), tone: 'slower' };
 };
 
+const emptyGap = (): StandingsGapInfo => ({
+  value: EMPTY_VALUE,
+  isLeader: false,
+  isEmpty: true,
+});
+
+const formatRaceGap = (
+  lapsBehind: number,
+  secondsBehind: number | null
+): StandingsGapInfo => {
+  if (lapsBehind > 0) {
+    return { value: `${lapsBehind} L`, isLeader: false, isEmpty: false };
+  }
+
+  if (
+    secondsBehind !== null &&
+    Number.isFinite(secondsBehind) &&
+    secondsBehind >= 0
+  ) {
+    return {
+      value: secondsBehind.toFixed(1),
+      isLeader: false,
+      isEmpty: false,
+    };
+  }
+
+  return emptyGap();
+};
+
+const getFinishGap = (
+  driver: DriverEntry,
+  reference: DriverEntry
+): StandingsGapInfo | null => {
+  const finish = driver.finishTiming;
+  const referenceFinish = reference.finishTiming;
+
+  if (!finish || !referenceFinish) {
+    return null;
+  }
+
+  const lapsBehind = referenceFinish.lapsCompleted - finish.lapsCompleted;
+
+  if (lapsBehind < 0) {
+    return emptyGap();
+  }
+
+  const hasOfficialPair =
+    finish.officialGap !== null && referenceFinish.officialGap !== null;
+  const driverTime = hasOfficialPair ? finish.officialGap : finish.crossingTime;
+  const referenceTime = hasOfficialPair
+    ? referenceFinish.officialGap
+    : referenceFinish.crossingTime;
+
+  return formatRaceGap(
+    lapsBehind,
+    driverTime !== null && referenceTime !== null
+      ? driverTime - referenceTime
+      : null
+  );
+};
+
+const estimatedLapFraction = (driver: DriverEntry): number | null => {
+  const pace = driver.classEstLapTime || driver.bestLapTime;
+
+  if (
+    pace === null ||
+    !Number.isFinite(pace) ||
+    pace <= 0 ||
+    !Number.isFinite(driver.estTime) ||
+    driver.estTime < 0 ||
+    (driver.estTime === 0 && driver.lapDistPct !== 0)
+  ) {
+    return null;
+  }
+
+  return driver.estTime / pace;
+};
+
+const getLiveRaceGap = (
+  driver: DriverEntry,
+  reference: DriverEntry
+): StandingsGapInfo | null => {
+  const driverProgress = lapProgressOf(driver);
+  const referenceProgress = lapProgressOf(reference);
+
+  if (driverProgress === null || referenceProgress === null) {
+    return null;
+  }
+
+  const progressBehind = referenceProgress - driverProgress;
+
+  if (progressBehind < 0) {
+    // The rank can still be settling after an overtake.
+    return emptyGap();
+  }
+
+  if (progressBehind >= 1) {
+    return formatRaceGap(Math.floor(progressBehind), null);
+  }
+
+  const driverFraction = estimatedLapFraction(driver);
+  const referenceFraction = estimatedLapFraction(reference);
+  const pace = driver.classEstLapTime || driver.bestLapTime;
+
+  if (driverFraction === null || referenceFraction === null || !pace) {
+    return null;
+  }
+
+  // Compare the pair in the trailing car's lap-time scale, across the line too.
+  const secondsBehind =
+    (reference.lap - driver.lap + referenceFraction - driverFraction) * pace;
+
+  return secondsBehind >= 0 ? formatRaceGap(0, secondsBehind) : null;
+};
+
 /**
  * The interval: the same measurement as the gap, taken against the car
  * directly ahead instead of the leader. The leader has no car ahead.
@@ -551,14 +666,16 @@ export const formatLapDelta = (delta: number | undefined): LapDeltaDisplay => {
 export const getStandingsInterval = (
   driver: DriverEntry,
   carAhead: DriverEntry | null,
-  isRace: boolean
+  isRace: boolean,
+  useLiveTiming = false
 ): StandingsGapInfo => {
   return getStandingsGap(
     driver,
     carAhead,
     isRace,
     false,
-    calculateLapsBehind(carAhead, driver)
+    calculateLapsBehind(carAhead, driver),
+    useLiveTiming
   );
 };
 
@@ -567,7 +684,8 @@ export const getStandingsGap = (
   leader: DriverEntry | null,
   isRace: boolean,
   isLeader: boolean,
-  lapsBehind: number
+  lapsBehind: number,
+  useLiveTiming = false
 ): StandingsGapInfo => {
   if (isLeader) {
     return { value: LEADER_LABEL, isLeader: true, isEmpty: false };
@@ -589,6 +707,20 @@ export const getStandingsGap = (
     return { value: EMPTY_VALUE, isLeader: false, isEmpty: true };
   }
 
+  const finishGap = getFinishGap(driver, leader);
+
+  if (finishGap) {
+    return finishGap;
+  }
+
+  if (useLiveTiming) {
+    const liveGap = getLiveRaceGap(driver, leader);
+
+    if (liveGap) {
+      return liveGap;
+    }
+  }
+
   // In race, try to use Session ResultsPositions gap data. Everything the sim
   // reports — `ResultsPositions` and `CarIdxF2Time` alike — is measured against
   // the *overall* leader; there is no per-class gap field. Subtracting the
@@ -608,7 +740,12 @@ export const getStandingsGap = (
   ) {
     const lapsDown = resLap - leaderLap;
 
-    if (lapsDown > 0) {
+    const hasLiveProgress =
+      useLiveTiming &&
+      lapProgressOf(driver) !== null &&
+      lapProgressOf(leader) !== null;
+
+    if (lapsDown > 0 && !hasLiveProgress) {
       return { value: `${lapsDown} L`, isLeader: false, isEmpty: false };
     }
 

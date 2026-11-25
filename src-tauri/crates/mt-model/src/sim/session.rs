@@ -162,6 +162,8 @@ pub struct SessionEntry {
     /// "unlimited" or a lap count as string (iRacing emits both forms).
     pub session_laps: String,
     pub results_positions: Vec<ResultPosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results_official: Option<bool>,
 }
 
 #[cfg_attr(feature = "dev", derive(specta::Type))]

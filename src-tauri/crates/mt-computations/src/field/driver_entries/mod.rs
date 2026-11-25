@@ -79,6 +79,8 @@ pub struct DriverEntry {
     pub raw_flags: u32,
     pub results_position_lap: Option<i32>,
     pub results_position_time: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_timing: Option<FinishTiming>,
     /// The sim marked the car as retired or disqualified (`ReasonOutId` != 0).
     /// A car merely sitting in the garage is *not* retired.
     pub is_retired: bool,
@@ -103,10 +105,45 @@ pub struct DriverEntry {
     pub last_pit_s: Option<f32>,
 }
 
+#[cfg_attr(feature = "dev", derive(specta::Type))]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishTiming {
+    pub laps_completed: i32,
+    pub crossing_time: Option<f64>,
+    pub official_gap: Option<f32>,
+}
+
+struct FinishSample {
+    time: f64,
+    laps_completed: i32,
+    progress: f32,
+}
+
+impl FinishSample {
+    fn crossing_since(&self, previous: &Self) -> Option<f64> {
+        let elapsed = self.time - previous.time;
+        if elapsed <= 0.0
+            || elapsed > 1.0
+            || self.laps_completed != previous.laps_completed.saturating_add(1)
+            || previous.progress <= 0.5
+            || self.progress >= 0.5
+        {
+            return None;
+        }
+
+        let after_line = f64::from(self.progress);
+        let distance = 1.0 - f64::from(previous.progress) + after_line;
+        Some(self.time - elapsed * after_line / distance)
+    }
+}
+
 #[derive(Default)]
 pub struct DriverEntriesState {
     pub pit_states: HashMap<i32, PitState>,
     pub finished_cars: HashSet<i32>,
+    finish_timings: HashMap<i32, FinishTiming>,
+    previous_finish_samples: HashMap<i32, FinishSample>,
     /// Session the latched finishers belong to — a new session clears them.
     pub finished_session_num: Option<i32>,
     /// Completed-lap count of every car on the previous tick, used as the baseline
@@ -153,6 +190,26 @@ pub fn compute(
     compute_ir_delta: bool,
     session_state: Option<SessionState>,
     state: &Mutex<DriverEntriesState>,
+) -> DriverEntriesFrame {
+    compute_with_clock(
+        car_idx,
+        session,
+        start_positions,
+        compute_ir_delta,
+        session_state,
+        state,
+        None,
+    )
+}
+
+fn compute_with_clock(
+    car_idx: &CarIdxFrame,
+    session: &SessionSnapshot,
+    start_positions: &HashMap<i32, (i32, i32)>,
+    compute_ir_delta: bool,
+    session_state: Option<SessionState>,
+    state: &Mutex<DriverEntriesState>,
+    session_time: Option<f64>,
 ) -> DriverEntriesFrame {
     let player_car_idx = session.player_car_idx;
     let drivers = &session.cars;
@@ -215,6 +272,8 @@ pub fn compute(
     if locked_state.finished_session_num != Some(session.current_session_num) {
         locked_state.finished_session_num = Some(session.current_session_num);
         locked_state.finished_cars.clear();
+        locked_state.finish_timings.clear();
+        locked_state.previous_finish_samples.clear();
         locked_state.laps_at_checkered = None;
         locked_state.leader_laps_at_checkered = None;
         locked_state.previous_laps.clear();
@@ -398,6 +457,7 @@ pub fn compute(
                 raw_flags: car_idx.car_idx_session_flags.get(idx).copied().unwrap_or(0),
                 results_position_lap: res_lap,
                 results_position_time: res_time,
+                finish_timing: None,
                 is_retired: result
                     .and_then(|position| position.reason_out_id)
                     .is_some_and(|reason| reason != 0),
@@ -435,6 +495,9 @@ pub fn compute(
     // every car one crossing early. So the leader's lap count is recorded there and
     // the latch arms on the tick that count grows.
     if is_race {
+        let results_official =
+            current_session.is_some_and(|session| session.results_official == Some(true));
+        let mut finish_samples = HashMap::with_capacity(entries.len());
         let is_ending = matches!(
             session_state,
             Some(SessionState::Checkered) | Some(SessionState::CoolDown)
@@ -510,6 +573,68 @@ pub fn compute(
                     .is_some_and(|&laps| laps > 0);
             let classified = race_has_ended && !entry.is_retired && started;
 
+            let sample = entry
+                .lap_dist_pct
+                .filter(|progress| *progress < 1.0 && !entry.is_towed)
+                .zip(session_time.filter(|time| time.is_finite()))
+                .zip(
+                    car_idx
+                        .car_idx_laps_completed
+                        .get(entry.car_idx as usize)
+                        .copied()
+                        .filter(|laps| *laps >= 0),
+                )
+                .map(|((progress, time), laps_completed)| FinishSample {
+                    time,
+                    laps_completed,
+                    progress,
+                });
+
+            if crossed_the_line
+                && !entry.is_retired
+                && !state.finished_cars.contains(&entry.car_idx)
+            {
+                let crossing_time = sample
+                    .as_ref()
+                    .zip(state.previous_finish_samples.get(&entry.car_idx))
+                    .and_then(|(current, previous)| current.crossing_since(previous));
+
+                state.finish_timings.insert(
+                    entry.car_idx,
+                    FinishTiming {
+                        laps_completed: completed,
+                        crossing_time,
+                        official_gap: None,
+                    },
+                );
+            }
+
+            if let Some(sample) = sample {
+                finish_samples.insert(entry.car_idx, sample);
+            }
+
+            if let Some((result, laps_completed)) = results_official
+                .then(|| results_positions_map.get(&entry.car_idx))
+                .flatten()
+                .and_then(|result| Some((result, result.laps_complete.filter(|laps| *laps > 0)?)))
+            {
+                let crossing_time = state
+                    .finish_timings
+                    .get(&entry.car_idx)
+                    .filter(|timing| timing.laps_completed == laps_completed)
+                    .and_then(|timing| timing.crossing_time);
+                state.finish_timings.insert(
+                    entry.car_idx,
+                    FinishTiming {
+                        laps_completed,
+                        crossing_time,
+                        official_gap: result.time.filter(|time| time.is_finite() && *time >= 0.0),
+                    },
+                );
+            }
+
+            entry.finish_timing = state.finish_timings.get(&entry.car_idx).copied();
+
             if crossed_the_line || classified {
                 state.finished_cars.insert(entry.car_idx);
                 state.towed_cars.remove(&entry.car_idx);
@@ -518,6 +643,8 @@ pub fn compute(
 
             entry.is_finished = state.finished_cars.contains(&entry.car_idx);
         }
+
+        state.previous_finish_samples = finish_samples;
     }
 
     locked_state.previous_location = entries
@@ -1084,13 +1211,14 @@ impl Processor for DriverEntriesProcessor {
     }
 
     fn compute(&mut self, ctx: &ComputeContext) -> Option<ComputedOutput> {
-        let mut frame = compute(
+        let mut frame = compute_with_clock(
             ctx.car_idx,
             ctx.session,
             ctx.start_positions,
             true,
             ctx.session_state,
             &self.state,
+            ctx.session_time,
         );
 
         self.speeds.apply(

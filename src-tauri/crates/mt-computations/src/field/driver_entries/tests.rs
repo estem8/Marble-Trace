@@ -319,6 +319,64 @@ fn test_car_finishes_when_it_crosses_the_line_under_the_checkered() {
 }
 
 #[test]
+fn finish_timing_survives_departure_and_accepts_only_official_results() {
+    let mut session = race_session();
+    let state = Mutex::new(DriverEntriesState::default());
+    let mut before = racing_car_idx_frame_on_lap(0, 12);
+    before.car_idx_lap_dist_pct = vec![0.99];
+    let mut crossing = racing_car_idx_frame_on_lap(CHECKERED, 13);
+    crossing.car_idx_lap_dist_pct = vec![0.01];
+    let standings = |car_idx: &CarIdxFrame, session: &SessionSnapshot, time, session_state| {
+        compute_with_clock(
+            car_idx,
+            session,
+            &HashMap::new(),
+            false,
+            Some(session_state),
+            &state,
+            Some(time),
+        )
+    };
+
+    standings(&before, &session, 600.0, SessionState::Racing);
+    session.sessions[0].results_positions.push(ResultPosition {
+        car_idx: 0,
+        position: 1,
+        laps_complete: Some(11),
+        time: Some(0.0),
+        ..Default::default()
+    });
+    let finished = standings(&crossing, &session, 600.2, SessionState::Checkered);
+    let timing = finished.entries[0].finish_timing.unwrap();
+    assert_eq!(timing.laps_completed, 12);
+    assert_eq!(timing.official_gap, None);
+    assert!((timing.crossing_time.unwrap() - 600.1).abs() < 0.00001);
+
+    let garage = garaged_car_idx_frame();
+    let retained = standings(&garage, &session, 609.0, SessionState::CoolDown);
+    assert_eq!(retained.entries[0].finish_timing, Some(timing));
+
+    session.sessions[0].results_official = Some(true);
+    session.sessions[0].results_positions[0].laps_complete = Some(12);
+    let official = standings(&garage, &session, 610.0, SessionState::CoolDown);
+    assert_eq!(
+        official.entries[0].finish_timing,
+        Some(FinishTiming {
+            official_gap: Some(0.0),
+            ..timing
+        })
+    );
+
+    session.current_session_num = 1;
+    session.sessions.push(SessionEntry {
+        session_type: SessionType::Race,
+        ..Default::default()
+    });
+    let next = standings(&before, &session, 6.0, SessionState::Racing);
+    assert_eq!(next.entries[0].finish_timing, None);
+}
+
+#[test]
 fn test_car_absent_at_the_flag_can_still_finish() {
     let session = race_session();
     let state = Mutex::new(DriverEntriesState::default());
@@ -1526,6 +1584,7 @@ pub(crate) fn make_live_entry(
         raw_flags: 0,
         results_position_lap: None,
         results_position_time: None,
+        finish_timing: None,
         is_retired: false,
         is_finished: false,
         is_towed: false,

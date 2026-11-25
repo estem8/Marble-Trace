@@ -531,19 +531,19 @@ describe('StandingsWidgetStore — per instance', () => {
     expect(table.lapDeltas.get(driver.carIdx)).toBeCloseTo(-2.04);
   });
 
-  it('ignores a regressed results lap even when the live lap advances', () => {
+  it('tracks completed laps even while the results gap stays at one lap', () => {
     const frame = core.backendComputed.driverEntries!;
     const [driver] = frame.entries;
-    const publishLap = (resultsPositionLap: number, lastLapTime: number) =>
+    const publishLap = (lapsCompleted: number, lastLapTime: number) =>
       runInAction(() =>
         core.backendComputed.updateDriverEntries({
           ...frame,
           entries: [
             {
               ...driver,
-              lap: 8,
-              lapsCompleted: 7,
-              resultsPositionLap,
+              lap: lapsCompleted + 1,
+              lapsCompleted,
+              resultsPositionLap: 1,
               lastLapTime,
             },
           ],
@@ -554,10 +554,11 @@ describe('StandingsWidgetStore — per instance', () => {
     const table = openTable(core, STANDINGS);
 
     publishLap(6, 91);
+    expect(table.lapDeltas.get(driver.carIdx)).toBe(-1);
     publishLap(5, 92);
     expect(table.lapDeltas.get(driver.carIdx)).toBe(-1);
-    publishLap(7, 90);
-    expect(table.lapDeltas.get(driver.carIdx)).toBe(-1);
+    publishLap(7, 89);
+    expect(table.lapDeltas.get(driver.carIdx)).toBe(-2);
   });
 
   it('accepts an identical pit-lane lap once the result confirms its time', () => {
