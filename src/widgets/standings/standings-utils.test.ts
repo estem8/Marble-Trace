@@ -358,6 +358,23 @@ describe('getStandingsGap', () => {
     );
   });
 
+  it('uses a provisional results gap without two comparable finish times', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 5,
+      finishTiming: { lapsCompleted: 40, crossingTime: null, officialGap: 3 },
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 1,
+      finishTiming: { lapsCompleted: 40, crossingTime: 100, officialGap: null },
+    });
+
+    expect(getStandingsInterval(driver, reference, true, true).value).toBe(
+      '4.0'
+    );
+  });
+
   it('keeps the crossing gap until both official times are available', () => {
     const driver = makeGapEntry({
       f2Time: 130,

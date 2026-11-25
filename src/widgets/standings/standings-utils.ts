@@ -590,19 +590,25 @@ const getFinishGap = (
     return emptyGap();
   }
 
+  if (lapsBehind > 0) {
+    return formatRaceGap(lapsBehind, null);
+  }
+
+  const isUsableTime = (time: number | null): time is number =>
+    time !== null && Number.isFinite(time);
   const hasOfficialPair =
-    finish.officialGap !== null && referenceFinish.officialGap !== null;
+    isUsableTime(finish.officialGap) &&
+    isUsableTime(referenceFinish.officialGap);
   const driverTime = hasOfficialPair ? finish.officialGap : finish.crossingTime;
   const referenceTime = hasOfficialPair
     ? referenceFinish.officialGap
     : referenceFinish.crossingTime;
 
-  return formatRaceGap(
-    lapsBehind,
-    driverTime !== null && referenceTime !== null
-      ? driverTime - referenceTime
-      : null
-  );
+  if (!isUsableTime(driverTime) || !isUsableTime(referenceTime)) {
+    return null;
+  }
+
+  return formatRaceGap(0, driverTime - referenceTime);
 };
 
 const estimatedLapFraction = (driver: DriverEntry): number | null => {

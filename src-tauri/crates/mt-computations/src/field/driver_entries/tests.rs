@@ -1003,6 +1003,7 @@ fn assert_post_flag_departure(
     assert_eq!(driver.is_finished, expected_finished);
     assert_eq!(driver.is_towed, !expected_finished);
     assert_eq!(driver.laps_completed, expected_laps_completed);
+    assert_eq!(driver.lap, expected_laps_completed + 1);
 
     departed.car_idx_laps_completed[0] = 0;
     let next = compute(
@@ -1015,6 +1016,7 @@ fn assert_post_flag_departure(
     );
     let driver = player_entry(&next);
     assert_eq!(driver.laps_completed, expected_laps_completed);
+    assert_eq!(driver.lap, expected_laps_completed + 1);
     assert_eq!(driver.is_finished, expected_finished);
 
     session.sessions.push(session.sessions[0].clone());
@@ -1031,6 +1033,43 @@ fn assert_post_flag_departure(
         player_entry(&reset).laps_completed,
         result_laps.unwrap_or(0)
     );
+}
+
+#[test]
+fn test_unavailable_live_count_keeps_departure_history_but_zero_replaces_it() {
+    for (next_count, expected_lap, expected_completed) in [(-1, 12, 11), (0, 1, 0)] {
+        let session = race_session();
+        let state = Mutex::new(DriverEntriesState::default());
+        let standings = |frame: &CarIdxFrame| {
+            compute(
+                frame,
+                &session,
+                &HashMap::new(),
+                false,
+                Some(SessionState::Racing),
+                &state,
+            )
+        };
+
+        standings(&racing_car_idx_frame_on_lap(0, 12));
+        let mut on_track = racing_car_idx_frame_on_lap(0, 12);
+        on_track.car_idx_laps_completed[0] = next_count;
+        standings(&on_track);
+
+        let departed = standings(&garaged_car_idx_frame());
+        assert_eq!(player_entry(&departed).laps_completed, expected_completed);
+        assert_eq!(player_entry(&departed).lap, expected_lap);
+
+        let without_history = compute(
+            &garaged_car_idx_frame(),
+            &session,
+            &HashMap::new(),
+            false,
+            Some(SessionState::Racing),
+            &Mutex::new(DriverEntriesState::default()),
+        );
+        assert_eq!(player_entry(&without_history).lap, 0);
+    }
 }
 
 #[test]

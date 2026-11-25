@@ -357,14 +357,12 @@ fn compute_with_clock(
                 .copied()
                 .unwrap_or(TrackSurface::NotInWorld);
             let live_lap = car_idx.car_idx_lap.get(idx).copied().filter(|&lap| lap > 0);
-            let result_laps = result.and_then(|position| position.laps_complete);
-            let lap = live_lap
-                .or_else(|| {
-                    result_laps
-                        .filter(|&laps| laps >= 0)
-                        .map(|laps| laps.saturating_add(1))
-                })
-                .unwrap_or(0);
+            let result_laps = result
+                .and_then(|position| position.laps_complete)
+                .filter(|&laps| laps >= 0);
+            let is_retired = result
+                .and_then(|position| position.reason_out_id)
+                .is_some_and(|reason| reason != 0);
             let live_lap_time = car_idx
                 .car_idx_last_lap_time
                 .get(idx)
@@ -376,6 +374,41 @@ fn compute_with_clock(
                 .get(idx)
                 .copied()
                 .filter(|&laps| laps >= 0);
+            let retained_laps = locked_state
+                .last_in_world_laps
+                .get(&driver.car_idx)
+                .copied();
+            let observed_laps = if track_surface != TrackSurface::NotInWorld {
+                live_laps_completed.or(result_laps)
+            } else if !is_retired && departed_track(driver.car_idx, track_surface, &locked_state) {
+                // A positive live count can include a crossing on the departure tick.
+                live_laps_completed
+                    .filter(|&laps| laps > 0)
+                    .map(|laps| laps.max(retained_laps.unwrap_or(0)))
+            } else {
+                None
+            };
+
+            if let Some(observed_laps) = observed_laps {
+                locked_state
+                    .last_in_world_laps
+                    .insert(driver.car_idx, observed_laps);
+            }
+
+            let laps_completed = resolve_laps_completed(
+                live_laps_completed,
+                result_laps,
+                observed_laps.or(retained_laps),
+                track_surface,
+            );
+            let inferred_laps = if track_surface == TrackSurface::NotInWorld {
+                laps_completed
+            } else {
+                result_laps
+            };
+            let lap = live_lap
+                .or_else(|| inferred_laps.map(|laps| laps.saturating_add(1)))
+                .unwrap_or(0);
             let completed_lap_matches_result = live_laps_completed
                 .zip(result_laps)
                 .is_some_and(|(live, recorded)| live == recorded);
@@ -418,15 +451,7 @@ fn compute_with_clock(
                 live_class_position: 0,
                 start_pos_overall: start_overall,
                 start_pos_class: start_class,
-                laps_completed: resolve_laps_completed(
-                    live_laps_completed,
-                    result_laps,
-                    locked_state
-                        .last_in_world_laps
-                        .get(&driver.car_idx)
-                        .copied(),
-                    track_surface,
-                ),
+                laps_completed: laps_completed.unwrap_or(0),
                 lap,
                 lap_dist_pct: car_idx
                     .car_idx_lap_dist_pct
@@ -466,9 +491,7 @@ fn compute_with_clock(
                 results_position_lap: res_lap,
                 results_position_time: res_time,
                 finish_timing: None,
-                is_retired: result
-                    .and_then(|position| position.reason_out_id)
-                    .is_some_and(|reason| reason != 0),
+                is_retired,
                 is_finished: false,
                 is_towed: false,
                 pit_state: PitState::None,
@@ -482,30 +505,6 @@ fn compute_with_clock(
 
     entries.sort_by_key(official_sort_key);
     update_tow_states(&mut entries, &mut locked_state);
-
-    for entry in &mut entries {
-        if entry.track_surface != TrackSurface::NotInWorld {
-            locked_state
-                .last_in_world_laps
-                .insert(entry.car_idx, entry.laps_completed);
-        } else if departed_track(entry, &locked_state) && !entry.is_retired {
-            // The live count can include a crossing on the departure tick.
-            let live_completed = car_idx
-                .car_idx_laps_completed
-                .get(entry.car_idx as usize)
-                .copied()
-                .filter(|laps| *laps > 0);
-
-            if let Some(live_completed) = live_completed {
-                let retained = locked_state
-                    .last_in_world_laps
-                    .entry(entry.car_idx)
-                    .or_default();
-                *retained = (*retained).max(live_completed);
-                entry.laps_completed = entry.laps_completed.max(*retained);
-            }
-        }
-    }
 
     // Finish latch. A car has finished once it crosses the line after the flag came
     // out, which the lap counter records against a baseline snapshotted from the tick
@@ -903,11 +902,14 @@ fn resolve_laps_completed(
     result_laps: Option<i32>,
     retained_laps: Option<i32>,
     track_surface: TrackSurface,
-) -> i32 {
+) -> Option<i32> {
     if track_surface == TrackSurface::NotInWorld {
-        result_laps.max(retained_laps).or(live_laps).unwrap_or(0)
+        // An out-of-world zero from live telemetry is also the SDK's cleared value.
+        result_laps
+            .max(retained_laps)
+            .or(live_laps.filter(|&laps| laps > 0))
     } else {
-        live_laps.or(result_laps).unwrap_or(0)
+        live_laps.or(result_laps).or(retained_laps)
     }
 }
 
@@ -926,11 +928,11 @@ fn completed_laps_for_finish(entry: &DriverEntry, state: &DriverEntriesState) ->
     entry.laps_completed
 }
 
-fn departed_track(entry: &DriverEntry, state: &DriverEntriesState) -> bool {
-    entry.track_surface == TrackSurface::NotInWorld
+fn departed_track(car_idx: i32, track_surface: TrackSurface, state: &DriverEntriesState) -> bool {
+    track_surface == TrackSurface::NotInWorld
         && state
             .previous_location
-            .get(&entry.car_idx)
+            .get(&car_idx)
             .is_some_and(|(surface, on_pit_road)| {
                 !on_pit_road && matches!(surface, TrackSurface::OnTrack | TrackSurface::OffTrack)
             })
@@ -950,7 +952,10 @@ fn update_tow_states(entries: &mut [DriverEntry], state: &mut DriverEntriesState
             state.towed_cars.remove(&entry.car_idx);
         }
 
-        if departed_track(entry, state) && !entry.is_retired && !has_finished {
+        if departed_track(entry.car_idx, entry.track_surface, state)
+            && !entry.is_retired
+            && !has_finished
+        {
             let frozen = state
                 .previous_progress
                 .get(&entry.car_idx)
