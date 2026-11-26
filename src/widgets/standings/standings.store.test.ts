@@ -5,6 +5,7 @@ import { PreviewCore } from '@app/roots/renderer-core';
 import { standingsHotkeyTargets } from '@features/hotkey-bindings/hotkey-targets';
 import { seedScenario } from '@features/preview/scenarios';
 import { DEFAULT_PREVIEW_SCENARIO_ID } from '@features/preview/scenarios';
+import { computeClassSof } from '@shared/lib/driver';
 import type { WidgetStoreFactory } from '@entities/widget/widget-instances.store';
 import type { WidgetCore } from '@widgets/widget-mount';
 import { StandingsWidgetStore } from './standings.store';
@@ -120,6 +121,11 @@ describe('StandingsWidgetStore — per instance', () => {
     const marked = openTable(core, STANDINGS);
     const unmarked = openTable(core, COPY_ID);
 
+    runInAction(() => {
+      core.liveWidgets.updateUserSettings(STANDINGS, { viewMode: 'cycling' });
+      core.liveWidgets.updateUserSettings(COPY_ID, { viewMode: 'cycling' });
+    });
+
     runInAction(() => core.liveWidgets.setHotkeysActOn(COPY_ID, false));
 
     for (const table of standingsHotkeyTargets(core)) {
@@ -133,6 +139,97 @@ describe('StandingsWidgetStore — per instance', () => {
     unmarked.cycleNext(core.backendComputed.carClassCount);
 
     expect(unmarked.activeClassIndex).toBe(1);
+  });
+
+  it('ignores class hotkeys outside cycling mode', () => {
+    const table = openTable(core, STANDINGS);
+
+    table.stepClass(1);
+
+    expect(table.activeClassIndex).toBe(0);
+  });
+
+  it('cycles only through classes that remain after filtering', () => {
+    const frame = core.backendComputed.driverEntries!;
+    const identities = core.backendComputed.driverIdentities;
+    const playerClassId = identities.find(
+      (entry) => entry.isPlayer
+    )!.carClassId;
+    const classByCarIdx = new Map(
+      identities.map((entry) => [entry.carIdx, entry.carClassId])
+    );
+    const hiddenClassId = frame.entries.find(
+      (entry) => classByCarIdx.get(entry.carIdx) !== playerClassId
+    )!;
+    const hiddenClass = classByCarIdx.get(hiddenClassId.carIdx)!;
+    const table = openTable(core, STANDINGS);
+
+    runInAction(() => {
+      core.liveWidgets.updateUserSettings(STANDINGS, {
+        viewMode: 'cycling',
+        hideRetiredDrivers: true,
+      });
+      core.backendComputed.updateDriverEntries({
+        ...frame,
+        entries: frame.entries.map((entry) =>
+          classByCarIdx.get(entry.carIdx) === hiddenClass
+            ? { ...entry, isRetired: true }
+            : entry
+        ),
+      });
+    });
+
+    const expectedClassIds = new Set(
+      frame.entries
+        .filter((entry) => classByCarIdx.get(entry.carIdx) !== hiddenClass)
+        .map((entry) => classByCarIdx.get(entry.carIdx))
+    );
+    expect(new Set(table.allClassGroups.map((group) => group.classId))).toEqual(
+      expectedClassIds
+    );
+    expect(expectedClassIds.size).toBeGreaterThan(0);
+    runInAction(() => {
+      table.activeClassIndex = table.allClassGroups.length - 1;
+    });
+    table.stepClass(1);
+
+    expect(table.activeClassIndex).toBe(0);
+  });
+
+  it('calculates class SOF from the full roster when rows are filtered', () => {
+    const frame = core.backendComputed.driverEntries!;
+    runInAction(() =>
+      core.liveWidgets.updateUserSettings(STANDINGS, {
+        hideRetiredDrivers: true,
+      })
+    );
+    const table = openTable(core, STANDINGS);
+    const groupToFilter = table.allClassGroups.find(
+      (group) => group.drivers.length > 1
+    )!;
+    const classToFilter = groupToFilter.classId;
+    const classRoster = core.backendComputed.driverIdentities.filter(
+      (entry) => entry.carClassId === classToFilter
+    );
+    const retiredCarIdx = groupToFilter.drivers.find(
+      (entry) => !entry.isPlayer
+    )!.carIdx;
+
+    runInAction(() => {
+      core.backendComputed.updateDriverEntries({
+        ...frame,
+        entries: frame.entries.map((entry) =>
+          entry.carIdx === retiredCarIdx ? { ...entry, isRetired: true } : entry
+        ),
+      });
+    });
+
+    const group = table.allClassGroups.find(
+      (candidate) => candidate.classId === classToFilter
+    );
+
+    expect(group).toBeDefined();
+    expect(group?.classSof).toBe(computeClassSof(classRoster));
   });
 
   it('stops reacting to the field once its instance unmounts', () => {
@@ -246,6 +343,9 @@ describe('StandingsWidgetStore — per instance', () => {
 
   it('keeps the class gap reference on the displayed class leader', () => {
     const frame = core.backendComputed.driverEntries!;
+    runInAction(() =>
+      core.liveWidgets.updateUserSettings(STANDINGS, { viewMode: 'grouped' })
+    );
     const [leaderIdentity] = core.backendComputed.driverIdentities;
     const challengerIdentity = core.backendComputed.driverIdentities.find(
       (entry) =>
@@ -286,9 +386,25 @@ describe('StandingsWidgetStore — per instance', () => {
     const table = openTable(core, STANDINGS);
     publishRanks(2, 1);
 
-    expect(table.classLeaders.get(leaderIdentity.carClassId)?.carIdx).toBe(
+    expect(table.gapLeaderOf(leaderIdentity.carClassId)?.carIdx).toBe(
       leader.carIdx
     );
+  });
+
+  it('reads the lap delta published before the table was opened', () => {
+    const frame = core.backendComputed.driverEntries!;
+    const [driver] = frame.entries;
+
+    runInAction(() =>
+      core.backendComputed.updateDriverEntries({
+        ...frame,
+        entries: [{ ...driver, lastLapDelta: -0.27 }],
+      })
+    );
+
+    const table = openTable(core, STANDINGS);
+
+    expect(table.driverMap.get(driver.carIdx)?.lastLapDelta).toBe(-0.27);
   });
 
   it.each([false, true])(
@@ -409,88 +525,6 @@ describe('StandingsWidgetStore — per instance', () => {
     });
 
     expect(playerTable.projectedIrDeltaOf(driver.carIdx)).toBe(-8);
-  });
-
-  it('replaces a lap delta with zero on an identical consecutive lap', () => {
-    const frame = core.backendComputed.driverEntries!;
-    const [driver] = frame.entries;
-    const publishLap = (lap: number, lastLapTime: number) =>
-      runInAction(() =>
-        core.backendComputed.updateDriverEntries({
-          ...frame,
-          entries: [{ ...driver, lap, lastLapTime }],
-        })
-      );
-
-    publishLap(2, 92.3);
-    const table = openTable(core, STANDINGS);
-
-    publishLap(3, 92.1);
-    expect(table.lapDeltas.get(driver.carIdx)).toBeCloseTo(-0.2);
-
-    publishLap(4, 92.1);
-    expect(table.lapDeltas.get(driver.carIdx)).toBe(0);
-  });
-
-  it('clears the delta when the player serves a penalty at Daytona', () => {
-    const frame = core.backendComputed.driverEntries!;
-    const driver = frame.entries.find((entry) => entry.isPlayer)!;
-    const publishLap = (
-      lap: number,
-      lastLapTime: number | null,
-      onPitRoad = false
-    ) =>
-      runInAction(() =>
-        core.backendComputed.updateDriverEntries({
-          ...frame,
-          entries: [{ ...driver, lap, lastLapTime, onPitRoad }],
-        })
-      );
-
-    publishLap(4, 49.3985);
-    const table = openTable(core, STANDINGS);
-
-    publishLap(5, 49.3495);
-    expect(table.lapDeltas.get(driver.carIdx)).toBeCloseTo(-0.049);
-
-    publishLap(5, 49.3495, true);
-    publishLap(6, 49.3495, true);
-    expect(table.lapDeltas.has(driver.carIdx)).toBe(false);
-
-    publishLap(6, null, true);
-    publishLap(6, null);
-    expect(table.lapDeltas.has(driver.carIdx)).toBe(false);
-
-    publishLap(7, 143.3306);
-    expect(table.lapDeltas.has(driver.carIdx)).toBe(false);
-
-    publishLap(8, 50);
-    expect(table.lapDeltas.get(driver.carIdx)).toBeCloseTo(-93.3306);
-  });
-
-  it('uses the first timed lap after a jump as the next baseline', () => {
-    const frame = core.backendComputed.driverEntries!;
-    const [driver] = frame.entries;
-    const publishLap = (lap: number, lastLapTime: number) =>
-      runInAction(() =>
-        core.backendComputed.updateDriverEntries({
-          ...frame,
-          entries: [{ ...driver, lap, lastLapTime }],
-        })
-      );
-
-    publishLap(3, 92);
-    const table = openTable(core, STANDINGS);
-    publishLap(4, 91);
-    expect(table.lapDeltas.get(driver.carIdx)).toBe(-1);
-
-    publishLap(6, 89);
-    expect(table.lapDeltas.has(driver.carIdx)).toBe(false);
-    publishLap(6, 88);
-    expect(table.lapDeltas.has(driver.carIdx)).toBe(false);
-
-    publishLap(7, 90);
-    expect(table.lapDeltas.get(driver.carIdx)).toBe(2);
   });
 
   describe('cars without a place', () => {

@@ -116,6 +116,7 @@ const spaceField = (
       // speed readouts put a parked car in the middle of the pack.
       speed: entry.speed || PACK_SPEED_MPS,
       lap,
+      lapsCompleted: Math.max(0, lap - 1),
       lapDistPct,
       relativeLapDist: signedLapDistDiff(lapDistPct),
       estTime: lapDistPct * lapTimeS,
@@ -124,6 +125,7 @@ const spaceField = (
       // Half the snapshot's field never set a lap, which would leave the lap
       // time columns blank in the one scenario written to size them.
       lastLapTime: lapTime,
+      lastLapDelta: null,
       bestLapTime: lapTime - LAP_TIME_SPREAD_S,
       qualifyTime: lapTime,
       // The gap column prefers the sim's own results gap and falls back to

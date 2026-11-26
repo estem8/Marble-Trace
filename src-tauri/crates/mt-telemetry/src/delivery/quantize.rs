@@ -173,12 +173,16 @@ fn driver_entry(entry: &mut DriverEntry) {
     round_opt(&mut entry.lap_dist_pct, POSITION_DP);
     round_opt(&mut entry.relative_lap_dist, POSITION_DP);
     entry.est_time = round(entry.est_time, GAP_DP);
-    entry.f2_time = round(entry.f2_time, GAP_DP);
+    round_opt(&mut entry.f2_time, GAP_DP);
     round_opt(&mut entry.last_lap_time, LAP_TIME_DP);
+    round_opt(&mut entry.last_lap_delta, GAP_DP);
     round_opt(&mut entry.best_lap_time, LAP_TIME_DP);
     round_opt(&mut entry.qualify_time, LAP_TIME_DP);
     entry.class_est_lap_time = round(entry.class_est_lap_time, LAP_TIME_DP);
     round_opt(&mut entry.results_position_time, LAP_TIME_DP);
+    if let Some(timing) = &mut entry.finish_timing {
+        round_opt(&mut timing.official_gap, LAP_TIME_DP);
+    }
     round_opt(&mut entry.speed, SPEED_DP);
     round_opt(&mut entry.pit_elapsed_s, GAP_DP);
     round_opt(&mut entry.last_pit_s, GAP_DP);

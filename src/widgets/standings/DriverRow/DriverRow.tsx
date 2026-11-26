@@ -25,17 +25,15 @@ import { TireBadge } from '@shared/ui/TireBadge/TireBadge';
 import {
   buildBlockEndColumns,
   buildGridTemplate,
-  calculateLapsBehind,
   EMPTY_VALUE,
   formatLapCell,
   formatLapDelta,
   getStandingsGap,
-  getStandingsInterval,
   isPersonalBestLastLap,
   resolveBestLapDisplay,
   visibleStandingsColumns,
   type LapDeltaTone,
-  type StandingsGapInfo,
+  type StandingsGap,
 } from '@widgets/standings/standings-utils';
 import type { StandingsColumn } from '@widgets/standings/standings-columns';
 import { useStandingsWidgetStore } from '@widgets/standings/standings.store';
@@ -47,37 +45,36 @@ import { PosChange } from './PosChange';
 import { PositionCell } from './PositionCell';
 import styles from './DriverRow.module.scss';
 
-// The leader and a lapped car read as chips — a state, not a distance; a
-// distance stays a plain number. Laps down are the only gap written "N L".
-const isLapsDown = (gapInfo: StandingsGapInfo): boolean =>
-  gapInfo.value.endsWith(' L');
-
 const writeGap = (
   element: HTMLSpanElement,
-  gapInfo: StandingsGapInfo,
+  gapInfo: StandingsGap,
   valueClass: string
 ) => {
-  if (gapInfo.isLeader) {
-    writeStatChip(element, 'accent', 'label', gapInfo.value);
+  if (gapInfo.kind === 'leader') {
+    writeStatChip(element, 'accent', 'label', 'LDR');
 
     return;
   }
 
-  if (isLapsDown(gapInfo)) {
-    writeStatChip(element, 'lapped', 'number', gapInfo.value);
+  if (gapInfo.kind === 'laps') {
+    writeStatChip(element, 'lapped', 'number', `${gapInfo.laps} L`);
 
     return;
   }
 
-  const className = gapInfo.isEmpty
-    ? `${styles.gapEmpty} ${styles.cellEmpty}`
-    : valueClass;
+  const className =
+    gapInfo.kind === 'empty'
+      ? `${styles.gapEmpty} ${styles.cellEmpty}`
+      : valueClass;
 
   if (element.className !== className) {
     element.className = className;
   }
 
-  writeText(element, gapInfo.value);
+  writeText(
+    element,
+    gapInfo.kind === 'empty' ? EMPTY_VALUE : gapInfo.seconds.toFixed(1)
+  );
 };
 
 const LAP_DELTA_TONE_CLASS: Record<LapDeltaTone, string> = {
@@ -125,31 +122,24 @@ export const DriverRow = observer(
           return;
         }
 
-        const byClass = settings.viewMode !== 'all';
-        const leaderIdentity = byClass
-          ? (standingsWidget.classLeaders.get(liveDriver.carClassId) ?? null)
-          : standingsWidget.overallLeader;
+        const leaderIdentity = standingsWidget.gapLeaderOf(
+          liveDriver.carClassId
+        );
         const liveLeader = leaderIdentity
           ? computed.driverEntryOf(leaderIdentity.carIdx)
           : null;
 
-        const isRaceSession = session.currentSessionType === 'Race';
-
-        const leads = leaderIdentity?.carIdx === carIdx;
-
-        const gapInfo = getStandingsGap(
-          liveDriver,
-          liveLeader,
-          isRaceSession,
-          leads,
-          calculateLapsBehind(liveLeader, liveDriver)
-        );
+        const gapInfo = getStandingsGap(liveDriver, liveLeader, {
+          isRace: session.currentSessionType === 'Race',
+          isLeader: leaderIdentity?.carIdx === carIdx,
+          useLiveTiming: standingsWidget.useLiveTiming,
+        });
 
         scheduleWrite(() =>
           writeGap(element, gapInfo, `${styles.gapValue} ${dimClass}`)
         );
       },
-      [computed, standingsWidget, session, settings, carIdx, dimClass]
+      [computed, standingsWidget, session, carIdx, dimClass]
     );
 
     // Same measurement as the gap, against the car drawn directly above.
@@ -167,11 +157,10 @@ export const DriverRow = observer(
             ? null
             : (computed.driverEntryOf(aheadIdx) ?? null);
 
-        const intervalInfo = getStandingsInterval(
-          liveDriver,
-          liveAhead,
-          session.currentSessionType === 'Race'
-        );
+        const intervalInfo = getStandingsGap(liveDriver, liveAhead, {
+          isRace: session.currentSessionType === 'Race',
+          useLiveTiming: standingsWidget.useLiveTiming,
+        });
 
         scheduleWrite(() =>
           writeGap(element, intervalInfo, `${styles.intervalValue} ${dimClass}`)
@@ -215,9 +204,7 @@ export const DriverRow = observer(
     const bestLapText = formatLapCell(bestLap.time);
     const isPersonalBest = !isPit && isPersonalBestLastLap(driver);
 
-    const lapDeltaDisplay = formatLapDelta(
-      standingsWidget.lapDeltas.get(carIdx)
-    );
+    const lapDeltaDisplay = formatLapDelta(driver.lastLapDelta);
 
     // What rides on a chip's dark half: the time on pit road, the tow.
     const chipDetail = (status: DriverStatus) => {
@@ -295,7 +282,7 @@ export const DriverRow = observer(
           return (
             <div className={cellClass('laps', styles.cellCenter)}>
               <span className={`${styles.lapsCompleted} ${dimClass}`}>
-                {driver.lap}
+                {driver.lapsCompleted}
               </span>
             </div>
           );

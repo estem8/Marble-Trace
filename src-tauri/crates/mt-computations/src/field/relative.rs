@@ -93,13 +93,14 @@ impl Processor for RelativeProcessor {
             return None;
         }
 
-        let mut standings_frame = driver_entries::compute(
+        let mut standings_frame = driver_entries::compute_with_clock(
             ctx.car_idx,
             ctx.session,
             ctx.start_positions,
             false,
             ctx.session_state,
             &self.state,
+            ctx.session_time,
         );
 
         self.speeds.apply(
@@ -150,12 +151,14 @@ mod tests {
             live_class_position: 0,
             start_pos_overall: None,
             start_pos_class: None,
+            laps_completed: 0,
             lap: 0,
             lap_dist_pct: (lap_dist_pct >= 0.0).then_some(lap_dist_pct),
             last_lap_time: None,
+            last_lap_delta: None,
             best_lap_time: None,
             qualify_time: None,
-            f2_time: 0.0,
+            f2_time: None,
             est_time: 0.0,
             track_surface: TrackSurface::OnTrack,
             i_rating: 0,
@@ -180,6 +183,7 @@ mod tests {
             raw_flags: 0,
             results_position_lap: None,
             results_position_time: None,
+            finish_timing: None,
             is_retired: false,
             is_finished: false,
             is_towed: false,

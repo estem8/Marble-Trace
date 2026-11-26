@@ -1228,12 +1228,20 @@ export type DriverEntry = {
    */
   startPosOverall: number | null;
   startPosClass: number | null;
+  /**
+   * Number of fully completed laps; unlike `lap`, this excludes the lap in progress.
+   */
+  lapsCompleted: number;
   lap: number;
   lapDistPct: number | null;
   /**
    * `None` until the car completes a timed lap.
    */
   lastLapTime: number | null;
+  /**
+   * The last completed lap minus the preceding lap, in seconds.
+   */
+  lastLapDelta: number | null;
   /**
    * `None` until the car sets a lap time.
    */
@@ -1245,7 +1253,10 @@ export type DriverEntry = {
    * completed.
    */
   qualifyTime: number | null;
-  f2Time: number;
+  /**
+   * The gap to the telemetry leader, with zero reserved for that leader.
+   */
+  f2Time: number | null;
   estTime: number;
   trackSurface: TrackSurface;
   isPlayer: boolean;
@@ -1265,6 +1276,7 @@ export type DriverEntry = {
   rawFlags: number;
   resultsPositionLap: number | null;
   resultsPositionTime: number | null;
+  finishTiming?: FinishTiming | null;
   /**
    * The sim marked the car as retired or disqualified (`ReasonOutId` != 0).
    * A car merely sitting in the garage is *not* retired.
@@ -1389,6 +1401,12 @@ export type EnvironmentFrame = {
  * How many of a label's bundles carried one field.
  */
 export type FieldDelivery = { field: string; bundles: number };
+
+export type FinishTiming = {
+  lapsCompleted: number;
+  crossingTime: number | null;
+  officialGap: number | null;
+};
 
 export type FuelComputedFrame = {
   avgPerLap: number | null;
@@ -2873,6 +2891,7 @@ export type SessionEntry = {
    */
   sessionLaps: string;
   resultsPositions: ResultPosition[];
+  resultsOfficial?: boolean | null;
 };
 
 /**

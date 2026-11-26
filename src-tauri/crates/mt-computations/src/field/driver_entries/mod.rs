@@ -1,3 +1,5 @@
+mod race_timing;
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -16,7 +18,10 @@ use mt_model::sim::session::{
 };
 use mt_model::utils::lock_or_recover;
 
+use self::race_timing::FinishSession;
+
 const FALLBACK_SORT_POSITION: i32 = 999;
+const RESULT_LAP_TIME_TOLERANCE_S: f32 = 0.001;
 
 /// One car's standing at this tick. Only what moves during a session travels
 /// here: who the car is — driver, number, class, car, licence, rating — is the
@@ -47,10 +52,14 @@ pub struct DriverEntry {
     /// holds none — no qualifying and no results to read one from.
     pub start_pos_overall: Option<i32>,
     pub start_pos_class: Option<i32>,
+    /// Number of fully completed laps; unlike `lap`, this excludes the lap in progress.
+    pub laps_completed: i32,
     pub lap: i32,
     pub lap_dist_pct: Option<f32>,
     /// `None` until the car completes a timed lap.
     pub last_lap_time: Option<f32>,
+    /// The last completed lap minus the preceding lap, in seconds.
+    pub last_lap_delta: Option<f32>,
     /// `None` until the car sets a lap time.
     pub best_lap_time: Option<f32>,
     /// Lap time that earned the car its grid slot, from `QualifyResultsInfo`.
@@ -58,7 +67,8 @@ pub struct DriverEntry {
     /// where it is the only lap time the field has until the first one is
     /// completed.
     pub qualify_time: Option<f32>,
-    pub f2_time: f32,
+    /// The gap to the telemetry leader, with zero reserved for that leader.
+    pub f2_time: Option<f32>,
     pub est_time: f32,
     pub track_surface: TrackSurface,
     /// Copied from the session for the iRating estimate; never sent.
@@ -79,6 +89,8 @@ pub struct DriverEntry {
     pub raw_flags: u32,
     pub results_position_lap: Option<i32>,
     pub results_position_time: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_timing: Option<FinishTiming>,
     /// The sim marked the car as retired or disqualified (`ReasonOutId` != 0).
     /// A car merely sitting in the garage is *not* retired.
     pub is_retired: bool,
@@ -103,30 +115,122 @@ pub struct DriverEntry {
     pub last_pit_s: Option<f32>,
 }
 
+#[cfg_attr(feature = "dev", derive(specta::Type))]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishTiming {
+    pub laps_completed: i32,
+    pub crossing_time: Option<f64>,
+    pub official_gap: Option<f32>,
+}
+
+#[derive(Clone, Copy)]
+struct FinishSample {
+    time: f64,
+    laps_completed: i32,
+    progress: f32,
+}
+
+impl FinishSample {
+    fn crossing_since(&self, previous: &Self) -> Option<f64> {
+        let elapsed = self.time - previous.time;
+        if elapsed <= 0.0
+            || elapsed > 1.0
+            || self.laps_completed != previous.laps_completed.saturating_add(1)
+            || previous.progress <= 0.5
+            || self.progress >= 0.5
+        {
+            return None;
+        }
+
+        let after_line = f64::from(self.progress);
+        let distance = 1.0 - f64::from(previous.progress) + after_line;
+        Some(self.time - elapsed * after_line / distance)
+    }
+}
+
+#[derive(Default)]
+struct LapHistory {
+    number: i32,
+    time: Option<f32>,
+    previous_time: Option<f32>,
+}
+
+impl LapHistory {
+    fn observe(
+        &mut self,
+        number: i32,
+        time: Option<f32>,
+        results_confirm_time: bool,
+        in_world: bool,
+    ) -> Option<f32> {
+        if number == 0 && in_world {
+            *self = Self::default();
+        } else if number > 0 && number >= self.number {
+            if number != self.number {
+                self.previous_time = (number - self.number == 1).then_some(self.time).flatten();
+                self.number = number;
+                self.time = None;
+            }
+
+            // The sim can advance the lap counter before replacing the old time.
+            if in_world || time.is_some() {
+                self.time =
+                    time.filter(|time| results_confirm_time || Some(*time) != self.previous_time);
+            }
+        }
+
+        (number == self.number)
+            .then(|| self.time.zip(self.previous_time))
+            .flatten()
+            .map(|(last, previous)| last - previous)
+    }
+}
+
+#[derive(Default)]
+struct CarRaceState {
+    started: bool,
+    finished: bool,
+    finish_timing: Option<FinishTiming>,
+    // Includes a completed lap reported on the tick the car leaves the world.
+    last_in_world_laps: Option<i32>,
+    display_laps: Option<i32>,
+    lap_history: LapHistory,
+}
+
 #[derive(Default)]
 pub struct DriverEntriesState {
-    pub pit_states: HashMap<i32, PitState>,
-    pub finished_cars: HashSet<i32>,
+    pit_states: HashMap<i32, PitState>,
+    race_timing: RaceTiming,
+}
+
+#[derive(Default)]
+struct RaceTiming {
+    cars: HashMap<i32, CarRaceState>,
+    previous_finish_samples: HashMap<i32, FinishSample>,
     /// Session the latched finishers belong to — a new session clears them.
-    pub finished_session_num: Option<i32>,
+    timing_session_num: Option<i32>,
     /// Completed-lap count of every car on the previous tick, used as the baseline
     /// the finish latch compares against once the checkered flag comes out. Laps
     /// *completed*, not the lap being driven — see `resolve_laps_completed`.
-    pub previous_laps: HashMap<i32, i32>,
+    previous_laps: HashMap<i32, i32>,
+    /// Last results completed-lap count observed for each car, kept separately from
+    /// resolved display laps so a source switch cannot look like a new crossing.
+    previous_result_laps: HashMap<i32, i32>,
     /// Completed-lap counts snapshotted when the checkered flag came out. `None`
     /// while the race is still running.
-    pub laps_at_checkered: Option<HashMap<i32, i32>>,
+    laps_at_checkered: Option<HashMap<i32, i32>>,
     /// Cars currently under tow, plus the lap progress they had when they were
     /// picked up — a car being carried has no lap distance of its own.
-    pub towed_cars: HashMap<i32, f64>,
+    towed_cars: HashMap<i32, f64>,
+    /// Lap count at the flag for towed cars, held until live telemetry shows
+    /// progress or CoolDown classifies them.
+    tow_finish_baselines: HashMap<i32, i32>,
     /// Track surface and pit-road flag of every car on the previous tick.
-    pub previous_location: HashMap<i32, (TrackSurface, bool)>,
+    previous_location: HashMap<i32, (TrackSurface, bool)>,
     /// Lap progress of every car on the previous tick, kept so a car that vanishes
     /// mid-lap can still be ranked by where it actually was.
-    pub previous_progress: HashMap<i32, f64>,
-    /// Laps the leader had completed when the session entered `Checkered`. The latch
-    /// arms on the tick this count grows — that crossing is the flag coming out.
-    pub leader_laps_at_checkered: Option<i32>,
+    previous_progress: HashMap<i32, f64>,
 }
 
 #[cfg_attr(feature = "dev", derive(specta::Type))]
@@ -151,6 +255,26 @@ pub fn compute(
     compute_ir_delta: bool,
     session_state: Option<SessionState>,
     state: &Mutex<DriverEntriesState>,
+) -> DriverEntriesFrame {
+    compute_with_clock(
+        car_idx,
+        session,
+        start_positions,
+        compute_ir_delta,
+        session_state,
+        state,
+        None,
+    )
+}
+
+pub(super) fn compute_with_clock(
+    car_idx: &CarIdxFrame,
+    session: &SessionSnapshot,
+    start_positions: &HashMap<i32, (i32, i32)>,
+    compute_ir_delta: bool,
+    session_state: Option<SessionState>,
+    state: &Mutex<DriverEntriesState>,
+    session_time: Option<f64>,
 ) -> DriverEntriesFrame {
     let player_car_idx = session.player_car_idx;
     let drivers = &session.cars;
@@ -210,16 +334,9 @@ pub fn compute(
         }
     }
 
-    if locked_state.finished_session_num != Some(session.current_session_num) {
-        locked_state.finished_session_num = Some(session.current_session_num);
-        locked_state.finished_cars.clear();
-        locked_state.laps_at_checkered = None;
-        locked_state.leader_laps_at_checkered = None;
-        locked_state.previous_laps.clear();
-        locked_state.towed_cars.clear();
-        locked_state.previous_location.clear();
-        locked_state.previous_progress.clear();
-    }
+    locked_state
+        .race_timing
+        .begin_session(session.current_session_num);
 
     let mut results_positions_map: HashMap<i32, &ResultPosition> = HashMap::new();
 
@@ -230,6 +347,8 @@ pub fn compute(
     let live_positions =
         live_positions_published(car_idx, &deduped_drivers, player_car_idx, results);
 
+    let mut evidenced_laps_by_car = HashMap::new();
+    let mut observed_wraps = HashSet::new();
     let mut entries: Vec<DriverEntry> = deduped_drivers
         .iter()
         .filter(|d| {
@@ -289,6 +408,192 @@ pub fn compute(
                 .map(|(overall, _)| overall)
                 .filter(|&pos| pos > 0);
             let start_class = start_slot.map(|(_, class)| class).filter(|&pos| pos > 0);
+            let track_surface = car_idx
+                .car_idx_track_surface
+                .get(idx)
+                .copied()
+                .unwrap_or(TrackSurface::NotInWorld);
+            let live_lap = car_idx.car_idx_lap.get(idx).copied().filter(|&lap| lap > 0);
+            let result_laps = result
+                .and_then(|position| position.laps_complete)
+                .filter(|&laps| laps >= 0);
+            let is_retired = result
+                .and_then(|position| position.reason_out_id)
+                .is_some_and(|reason| reason != 0);
+            let live_lap_time = car_idx
+                .car_idx_last_lap_time
+                .get(idx)
+                .copied()
+                .filter(|time| time.is_finite() && *time > 0.0);
+            let result_lap_time = result.and_then(|position| position.last_time);
+            let live_laps_completed = car_idx
+                .car_idx_laps_completed
+                .get(idx)
+                .copied()
+                .filter(|&laps| laps >= 0);
+            let retained_laps =
+                locked_state
+                    .race_timing
+                    .cars
+                    .get(&driver.car_idx)
+                    .and_then(|car| {
+                        if track_surface == TrackSurface::NotInWorld {
+                            car.display_laps
+                        } else {
+                            car.last_in_world_laps
+                        }
+                    });
+            let on_pit_road = car_idx
+                .car_idx_on_pit_road
+                .get(idx)
+                .copied()
+                .unwrap_or(false);
+            let live_laps_from_lap = (matches!(
+                track_surface,
+                TrackSurface::OnTrack | TrackSurface::OffTrack
+            ) && !on_pit_road
+                && live_laps_completed.is_none())
+            .then(|| {
+                live_lap.map(|lap| {
+                    let inferred_laps = lap.saturating_sub(1);
+                    result_laps
+                        .into_iter()
+                        .chain(retained_laps)
+                        .fold(inferred_laps, i32::max)
+                })
+            })
+            .flatten();
+            let resolved_live_laps = live_laps_completed.or(live_laps_from_lap);
+            let in_world = track_surface != TrackSurface::NotInWorld;
+            let pre_flag_wrap = if matches!(
+                session_state,
+                Some(SessionState::Racing | SessionState::Checkered)
+            ) && live_laps_completed.is_none()
+                && !on_pit_road
+                && matches!(
+                    track_surface,
+                    TrackSurface::OnTrack | TrackSurface::OffTrack
+                ) {
+                locked_state
+                    .race_timing
+                    .previous_progress
+                    .get(&driver.car_idx)
+                    .and_then(|previous| {
+                        let progress = car_idx.car_idx_lap_dist_pct.get(idx).copied()?;
+                        let lap = live_lap?;
+                        (previous.fract() > 0.5
+                            && (0.0..0.5).contains(&progress)
+                            && f64::from(lap) == previous.floor() + 1.0)
+                            .then_some(lap - 1)
+                    })
+            } else {
+                None
+            };
+            if pre_flag_wrap.is_some() {
+                observed_wraps.insert(driver.car_idx);
+            }
+            let (observed_laps, evidenced_laps) = if in_world {
+                (
+                    resolved_live_laps.or_else(|| result_laps.max(retained_laps)),
+                    live_laps_completed.or_else(|| {
+                        result_laps
+                            .max(
+                                locked_state
+                                    .race_timing
+                                    .previous_laps
+                                    .get(&driver.car_idx)
+                                    .copied(),
+                            )
+                            .max(pre_flag_wrap)
+                            .or(live_laps_from_lap)
+                    }),
+                )
+            } else if !is_retired
+                && departed_world(driver.car_idx, track_surface, &locked_state.race_timing)
+            {
+                let departure_laps = live_laps_completed
+                    .filter(|&laps| laps > 0)
+                    .map(|laps| laps.max(retained_laps.unwrap_or(0)));
+                (departure_laps, departure_laps)
+            } else {
+                (
+                    live_laps_completed
+                        .filter(|&laps| laps > 0)
+                        .map(|laps| laps.max(retained_laps.unwrap_or(0))),
+                    None,
+                )
+            };
+
+            let car = locked_state
+                .race_timing
+                .cars
+                .entry(driver.car_idx)
+                .or_default();
+            if observed_laps.is_some() {
+                car.display_laps = observed_laps;
+                if in_world || evidenced_laps.is_some() {
+                    car.last_in_world_laps = observed_laps;
+                }
+            }
+            if let Some(evidenced_laps) = evidenced_laps {
+                evidenced_laps_by_car.insert(driver.car_idx, evidenced_laps);
+            }
+
+            let laps_completed = resolve_laps_completed(
+                resolved_live_laps,
+                result_laps,
+                observed_laps.or(retained_laps),
+                track_surface,
+            );
+            let result_lap_time = result_lap_time
+                .filter(|_| result_laps.is_none_or(|laps| Some(laps) == laps_completed));
+            let inferred_lap = laps_completed.map(|laps| laps.saturating_add(1));
+            let lap = live_lap
+                .zip(inferred_lap)
+                .map(|(live, inferred)| live.max(inferred))
+                .or(live_lap)
+                .or(inferred_lap)
+                .unwrap_or(0);
+            let completed_lap_matches_result = live_laps_completed
+                .zip(result_laps)
+                .is_some_and(|(live, recorded)| live == recorded);
+            let live_lap_time_matches_count =
+                live_laps_completed.is_some() && live_laps_completed == laps_completed;
+            let current_result_time = result_laps
+                .zip(laps_completed)
+                .filter(|(result, completed)| result == completed)
+                .and(result_lap_time);
+            let stale_live_time = live_lap_time.is_some()
+                && laps_completed.is_some_and(|laps| {
+                    (laps > car.lap_history.number && live_lap_time == car.lap_history.time)
+                        || (laps == car.lap_history.number
+                            && live_lap_time == car.lap_history.previous_time)
+                });
+            let last_lap_time = if live_lap_time_matches_count {
+                if stale_live_time && current_result_time.is_some() {
+                    current_result_time
+                } else {
+                    live_lap_time.or(result_lap_time)
+                }
+            } else {
+                result_lap_time
+            };
+            let results_confirm_time = (result_laps.is_some()
+                && result_laps == laps_completed
+                && result_lap_time.is_some()
+                && (!live_lap_time_matches_count || live_lap_time.is_none() || stale_live_time))
+                || completed_lap_matches_result
+                    && live_lap_time
+                        .zip(result_lap_time)
+                        .is_some_and(|(live, recorded)| {
+                            (live - recorded).abs() < RESULT_LAP_TIME_TOLERANCE_S
+                        });
+            let last_lap_delta = car.lap_history.observe(
+                laps_completed.unwrap_or(0),
+                last_lap_time,
+                results_confirm_time,
+                in_world,
+            );
 
             DriverEntry {
                 car_idx: driver.car_idx,
@@ -318,27 +623,17 @@ pub fn compute(
                 live_class_position: 0,
                 start_pos_overall: start_overall,
                 start_pos_class: start_class,
-                lap: car_idx
-                    .car_idx_lap
-                    .get(idx)
-                    .copied()
-                    .filter(|&lap| lap > 0)
-                    .or_else(|| result.and_then(|position| position.laps_complete))
-                    .unwrap_or(0),
+                laps_completed: laps_completed.unwrap_or(0),
+                lap,
                 lap_dist_pct: car_idx
                     .car_idx_lap_dist_pct
                     .get(idx)
                     .copied()
-                    .filter(|pct| pct.is_finite() && *pct >= 0.0),
-                // The sim zeroes the live CarIdx lap times once a car leaves the world
-                // (garage after a session, tow, disconnect). `ResultsPositions` keeps
-                // the official times, so they stand in whenever the live value is gone.
-                last_lap_time: car_idx
-                    .car_idx_last_lap_time
-                    .get(idx)
-                    .copied()
-                    .filter(|time| *time > 0.0)
-                    .or_else(|| result.and_then(|position| position.last_time)),
+                    .filter(|pct| {
+                        track_surface != TrackSurface::NotInWorld && pct.is_finite() && *pct >= 0.0
+                    }),
+                last_lap_time,
+                last_lap_delta,
                 best_lap_time: car_idx
                     .car_idx_best_lap_time
                     .get(idx)
@@ -346,13 +641,13 @@ pub fn compute(
                     .filter(|time| *time > 0.0)
                     .or_else(|| result.and_then(|position| position.fastest_time)),
                 qualify_time: qualify_times.get(&driver.car_idx).copied(),
-                f2_time: car_idx.car_idx_f2_time.get(idx).copied().unwrap_or(0.0),
-                est_time: car_idx.car_idx_est_time.get(idx).copied().unwrap_or(0.0),
-                track_surface: car_idx
-                    .car_idx_track_surface
+                f2_time: car_idx
+                    .car_idx_f2_time
                     .get(idx)
                     .copied()
-                    .unwrap_or(TrackSurface::NotInWorld),
+                    .filter(|time| time.is_finite() && *time >= 0.0),
+                est_time: car_idx.car_idx_est_time.get(idx).copied().unwrap_or(0.0),
+                track_surface,
                 i_rating: driver.i_rating,
                 is_player: driver.car_idx == player_car_idx,
                 on_pit_road: car_idx
@@ -369,9 +664,8 @@ pub fn compute(
                 raw_flags: car_idx.car_idx_session_flags.get(idx).copied().unwrap_or(0),
                 results_position_lap: res_lap,
                 results_position_time: res_time,
-                is_retired: result
-                    .and_then(|position| position.reason_out_id)
-                    .is_some_and(|reason| reason != 0),
+                finish_timing: None,
+                is_retired,
                 is_finished: false,
                 is_towed: false,
                 pit_state: PitState::None,
@@ -384,138 +678,38 @@ pub fn compute(
         .collect();
 
     entries.sort_by_key(official_sort_key);
+    update_tow_states(&mut entries, &mut locked_state.race_timing);
+    release_tow_finish_baselines(&entries, car_idx, &mut locked_state.race_timing);
 
-    // Laps completed, resolved once and kept beside the entries rather than on
-    // them: only the finish latch needs it, and the wire does not.
-    let laps_completed: HashMap<i32, i32> = deduped_drivers
-        .iter()
-        .map(|driver| {
-            (
-                driver.car_idx,
-                resolve_laps_completed(
-                    car_idx,
-                    driver.car_idx as usize,
-                    results_positions_map.get(&driver.car_idx).copied(),
-                ),
-            )
-        })
-        .collect();
-
-    // Finish latch. A car has finished once it crosses the line after the flag came
-    // out, which the lap counter records against a baseline snapshotted from the tick
-    // before. Whatever is left over is classified when the race ends (`CoolDown`).
-    //
-    // What that baseline hangs on is the leader, not a flag bit. Neither bit marks the
-    // moment the field starts finishing: `CarIdxSessionFlags` carries the flags shown
-    // to a driver (black, blue, meatball) and never lights the checkered at all, and
-    // the session-wide `SessionFlags` checkered lights when the sim shows the flag to
-    // the *player's* car — in a fifteen-car race at the Red Bull Ring that was ten
-    // seconds after eleven cars had already taken it, and all eleven went into the
-    // baseline with their finishing lap already counted. A baseline they cannot exceed
-    // is a badge that never appears, so the whole leading group stayed unmarked until
-    // `CoolDown` classified it.
-    //
-    // The leader's own crossing is the flag. `SessionState::Checkered` is where the
-    // watch starts, not where the latch arms: in a timed race the sim enters it when
-    // the clock expires, a full lap before anyone finishes, so arming there latches
-    // every car one crossing early. So the leader's lap count is recorded there and
-    // the latch arms on the tick that count grows.
-    if is_race {
-        let is_ending = matches!(
-            session_state,
-            Some(SessionState::Checkered) | Some(SessionState::CoolDown)
-        );
-
-        let leader_laps = entries
-            .iter()
-            .filter_map(|entry| laps_completed.get(&entry.car_idx).copied())
-            .max()
-            .unwrap_or(0);
-
-        if !is_ending {
-            locked_state.leader_laps_at_checkered = None;
-        } else if locked_state.leader_laps_at_checkered.is_none() {
-            // Seeded from the previous tick, not this one. A lap-limited race enters
-            // `Checkered` on the very tick the leader takes the flag, and a watch that
-            // started from the already-incremented count would wait for a lap the
-            // leader will never drive.
-            let leader_before = locked_state
-                .previous_laps
-                .values()
-                .copied()
-                .max()
-                .unwrap_or(leader_laps);
-
-            locked_state.leader_laps_at_checkered = Some(leader_before);
-        }
-
-        // `CoolDown` is the backstop: a race can be ended from the black box or by the
-        // host with nobody crossing the line at all.
-        let checkered_is_out = matches!(session_state, Some(SessionState::CoolDown))
-            || locked_state
-                .leader_laps_at_checkered
-                .is_some_and(|before| leader_laps > before);
-
-        if checkered_is_out && locked_state.laps_at_checkered.is_none() {
-            // The leader needs no special case: on the tick it crosses, the previous
-            // tick still holds the lap it was on, so the same comparison that latches
-            // everyone behind latches the leader too.
-            locked_state.laps_at_checkered = Some(locked_state.previous_laps.clone());
-        }
-
-        let race_has_ended = matches!(session_state, Some(SessionState::CoolDown));
-
-        let state = &mut *locked_state;
-
-        for entry in &mut entries {
-            // A car missing from the snapshot was not in the field when the flag
-            // came out (it joined, rejoined, or this is the first tick after a
-            // reconnect). Seed its baseline with the lap it has right now, so it
-            // can still latch on its next crossing instead of never at all.
-            let completed = laps_completed.get(&entry.car_idx).copied().unwrap_or(0);
-
-            let crossed_the_line = state.laps_at_checkered.as_mut().is_some_and(|laps| {
-                let baseline = laps.entry(entry.car_idx).or_insert(completed);
-
-                completed > *baseline
-            });
-
-            // A car that leaves the world once the flag is out has finished and
-            // gone: quitting straight off the racing surface looks exactly like a
-            // tow, and its live lap counter is zeroed on the way out, so the
-            // crossing itself may never be observed on any tick. Without this the
-            // finisher who quits is never latched and is towed instead.
-            let left_after_the_flag = state.laps_at_checkered.is_some()
-                && entry.track_surface == TrackSurface::NotInWorld
-                && !entry.is_retired
-                && entry.lap > 0;
-
-            let classified = race_has_ended && !entry.is_retired && entry.lap > 0;
-
-            if crossed_the_line || left_after_the_flag || classified {
-                state.finished_cars.insert(entry.car_idx);
-            }
-
-            entry.is_finished = state.finished_cars.contains(&entry.car_idx);
-        }
-    }
-
-    locked_state.previous_laps = entries
-        .iter()
-        .map(|e| {
-            (
-                e.car_idx,
-                laps_completed.get(&e.car_idx).copied().unwrap_or(0),
-            )
-        })
-        .collect();
-
-    update_tow_states(&mut entries, &mut locked_state);
+    locked_state.race_timing.observe_finish(
+        &mut entries,
+        car_idx,
+        &results_positions_map,
+        &observed_wraps,
+        evidenced_laps_by_car,
+        is_race.then(|| FinishSession {
+            state: session_state,
+            time: session_time,
+            results_official: current_session
+                .is_some_and(|session| session.results_official == Some(true)),
+        }),
+    );
 
     match ranking_mode {
-        RankingMode::TrackOrder => assign_live_positions(&mut entries, &locked_state.towed_cars),
+        RankingMode::TrackOrder => {
+            assign_live_positions(&mut entries, &locked_state.race_timing.towed_cars)
+        }
         RankingMode::Grid => assign_static_positions(&mut entries, grid_sort_key),
         RankingMode::Official => assign_static_positions(&mut entries, official_sort_key),
+    }
+
+    for entry in &mut entries {
+        let is_live_leader =
+            live_positions && entry.live_position == 1 && entry.lap_dist_pct.is_some();
+
+        if entry.f2_time == Some(0.0) && !is_live_leader {
+            entry.f2_time = None;
+        }
     }
 
     let player_lap_dist = entries
@@ -718,52 +912,159 @@ fn is_racing(entry: &DriverEntry) -> bool {
 /// happens after the flag is not a race incident.
 /// Laps a car has actually completed.
 ///
-/// `CarIdxLapCompleted` and `ResultsPositions.LapsComplete` count the same thing,
-/// so the official results stand in without a change of scale the moment the sim
-/// zeroes the live value — which it does for every car that leaves the world. The
-/// lap counter beside it (`CarIdxLap`, the lap being driven) is one higher while
-/// the car is out there and falls back to a *completed* count when it is gone, and
-/// a finish latch comparing the two never fires for a driver who crosses the line
-/// and quits.
+/// Results and live telemetry use the same completed-lap count. Once the car
+/// leaves the world, an older result cannot replace the last observed count.
 fn resolve_laps_completed(
-    car_idx: &CarIdxFrame,
-    idx: usize,
-    result: Option<&ResultPosition>,
-) -> i32 {
-    car_idx
-        .car_idx_laps_completed
-        .get(idx)
-        .copied()
-        .filter(|&laps| laps >= 0)
-        .or_else(|| result.and_then(|position| position.laps_complete))
-        .unwrap_or(0)
+    live_laps: Option<i32>,
+    result_laps: Option<i32>,
+    retained_laps: Option<i32>,
+    track_surface: TrackSurface,
+) -> Option<i32> {
+    if track_surface == TrackSurface::NotInWorld {
+        // An out-of-world zero from live telemetry is also the SDK's cleared value.
+        result_laps
+            .max(retained_laps)
+            .max(live_laps.filter(|&laps| laps > 0))
+    } else {
+        live_laps.or_else(|| result_laps.max(retained_laps))
+    }
 }
 
-fn update_tow_states(entries: &mut [DriverEntry], state: &mut DriverEntriesState) {
+// The results feed can revise a towed car's count without a crossing.
+fn completed_laps_for_finish(entry: &DriverEntry, state: &RaceTiming) -> i32 {
+    if let Some(&baseline) = state.tow_finish_baselines.get(&entry.car_idx) {
+        return baseline;
+    }
+
+    if entry.track_surface == TrackSurface::NotInWorld
+        && state.towed_cars.contains_key(&entry.car_idx)
+    {
+        return state
+            .cars
+            .get(&entry.car_idx)
+            .and_then(|car| car.last_in_world_laps)
+            .unwrap_or(entry.laps_completed);
+    }
+
+    entry.laps_completed
+}
+
+fn retain_tow_finish_baselines(state: &mut RaceTiming, car_idx: &CarIdxFrame) {
+    let Some(laps_at_checkered) = state.laps_at_checkered.as_ref() else {
+        return;
+    };
+
+    for car_index in state.towed_cars.keys().copied() {
+        if let Some(&baseline) = laps_at_checkered.get(&car_index) {
+            let surface = car_idx
+                .car_idx_track_surface
+                .get(car_index as usize)
+                .copied()
+                .unwrap_or(TrackSurface::NotInWorld);
+            let live_advance = (surface != TrackSurface::NotInWorld
+                || departed_world(car_index, surface, state))
+                && car_idx
+                    .car_idx_laps_completed
+                    .get(car_index as usize)
+                    .is_some_and(|&laps| laps > baseline);
+
+            if live_advance {
+                continue;
+            }
+
+            state
+                .tow_finish_baselines
+                .entry(car_index)
+                .or_insert(baseline);
+        }
+    }
+}
+
+fn release_tow_finish_baselines(
+    entries: &[DriverEntry],
+    car_idx: &CarIdxFrame,
+    state: &mut RaceTiming,
+) {
+    for entry in entries {
+        let Some(baseline) = state.tow_finish_baselines.get(&entry.car_idx).copied() else {
+            continue;
+        };
+        let live_laps = car_idx
+            .car_idx_laps_completed
+            .get(entry.car_idx as usize)
+            .copied()
+            .filter(|laps| *laps >= 0);
+
+        if (entry.track_surface != TrackSurface::NotInWorld
+            || departed_world(entry.car_idx, entry.track_surface, state))
+            && live_laps.is_some_and(|laps| laps > baseline)
+        {
+            state.tow_finish_baselines.remove(&entry.car_idx);
+        }
+    }
+}
+
+fn finish_sample(
+    entry: &DriverEntry,
+    car_idx: &CarIdxFrame,
+    session_time: Option<f64>,
+) -> Option<FinishSample> {
+    let progress = entry
+        .lap_dist_pct
+        .filter(|progress| *progress < 1.0 && !entry.is_towed)?;
+    let time = session_time.filter(|time| time.is_finite())?;
+    let laps_completed = car_idx
+        .car_idx_laps_completed
+        .get(entry.car_idx as usize)
+        .copied()
+        .filter(|laps| *laps >= 0)?;
+
+    Some(FinishSample {
+        time,
+        laps_completed,
+        progress,
+    })
+}
+
+fn departed_world(car_idx: i32, track_surface: TrackSurface, state: &RaceTiming) -> bool {
+    track_surface == TrackSurface::NotInWorld
+        && state
+            .previous_location
+            .get(&car_idx)
+            .is_some_and(|(surface, _)| *surface != TrackSurface::NotInWorld)
+}
+
+fn departed_track(car_idx: i32, track_surface: TrackSurface, state: &RaceTiming) -> bool {
+    track_surface == TrackSurface::NotInWorld
+        && state
+            .previous_location
+            .get(&car_idx)
+            .is_some_and(|(surface, on_pit_road)| {
+                !on_pit_road && matches!(surface, TrackSurface::OnTrack | TrackSurface::OffTrack)
+            })
+}
+
+fn update_tow_states(entries: &mut [DriverEntry], state: &mut RaceTiming) {
     let active_car_indices: HashSet<i32> = entries.iter().map(|e| e.car_idx).collect();
 
-    state
-        .previous_location
-        .retain(|car_idx, _| active_car_indices.contains(car_idx));
     state
         .towed_cars
         .retain(|car_idx, _| active_car_indices.contains(car_idx));
 
     for entry in entries.iter_mut() {
-        let previous = state.previous_location.get(&entry.car_idx).copied();
-
-        let left_the_track_surface = previous.is_some_and(|(surface, on_pit_road)| {
-            !on_pit_road && matches!(surface, TrackSurface::OnTrack | TrackSurface::OffTrack)
-        });
-
-        let vanished = entry.track_surface == TrackSurface::NotInWorld;
-        let has_finished = state.finished_cars.contains(&entry.car_idx);
+        let has_finished = state
+            .cars
+            .get(&entry.car_idx)
+            .is_some_and(|car| car.finished);
 
         if has_finished {
             state.towed_cars.remove(&entry.car_idx);
         }
 
-        if vanished && left_the_track_surface && !entry.is_retired && !has_finished {
+        if departed_track(entry.car_idx, entry.track_surface, state)
+            && !entry.is_retired
+            && !has_finished
+        {
             let frozen = state
                 .previous_progress
                 .get(&entry.car_idx)
@@ -771,6 +1072,15 @@ fn update_tow_states(entries: &mut [DriverEntry], state: &mut DriverEntriesState
                 .unwrap_or(entry.lap as f64);
 
             state.towed_cars.entry(entry.car_idx).or_insert(frozen);
+            let finish_baseline = state
+                .cars
+                .get(&entry.car_idx)
+                .and_then(|car| car.last_in_world_laps)
+                .unwrap_or(entry.laps_completed);
+            state
+                .tow_finish_baselines
+                .entry(entry.car_idx)
+                .or_insert(finish_baseline);
         }
 
         // The tow ends the moment the car is back in the world — which is its pit
@@ -782,10 +1092,6 @@ fn update_tow_states(entries: &mut [DriverEntry], state: &mut DriverEntriesState
         }
 
         entry.is_towed = state.towed_cars.contains_key(&entry.car_idx);
-
-        state
-            .previous_location
-            .insert(entry.car_idx, (entry.track_surface, entry.on_pit_road));
 
         if let Some(progress) = lap_progress(entry) {
             state.previous_progress.insert(entry.car_idx, progress);
@@ -1052,13 +1358,14 @@ impl Processor for DriverEntriesProcessor {
     }
 
     fn compute(&mut self, ctx: &ComputeContext) -> Option<ComputedOutput> {
-        let mut frame = compute(
+        let mut frame = compute_with_clock(
             ctx.car_idx,
             ctx.session,
             ctx.start_positions,
             true,
             ctx.session_state,
             &self.state,
+            ctx.session_time,
         );
 
         self.speeds.apply(

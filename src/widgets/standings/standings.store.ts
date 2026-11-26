@@ -33,13 +33,6 @@ interface StandingsDeps {
 
 const OVERALL_REFERENCE = -1;
 
-type SeenLap = {
-  lap: number;
-  time: number | null;
-  previousTime: number | null;
-  crossedInPit: boolean;
-};
-
 /**
  * One standings table: its class tab, scroll, settle debounce and position
  * flashes. Built per instance by `mount.ts`, so two tables keep their own
@@ -54,15 +47,6 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
 
   private readonly order = new StandingsOrderStore();
 
-  /**
-   * carIdx → last lap minus the lap before it. The sim keeps only the last lap
-   * of each car, so the one before is whatever this table saw last — a car
-   * gets its first delta on the second lap completed while the table is open.
-   */
-  lapDeltas = new Map<number, number>();
-
-  private readonly seenLapTimes = new Map<number, SeenLap>();
-
   private readonly disposers: IReactionDisposer[] = [];
 
   private readonly root: StandingsDeps;
@@ -75,16 +59,12 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
     this.root = core;
     this.instanceId = instanceId;
 
-    makeAutoObservable<
-      StandingsWidgetStore,
-      'root' | 'order' | 'seenLapTimes' | 'disposers'
-    >(
+    makeAutoObservable<StandingsWidgetStore, 'root' | 'order' | 'disposers'>(
       this,
       {
         root: false,
         order: false,
         scroll: false,
-        seenLapTimes: false,
         disposers: false,
       },
       { autoBind: true }
@@ -109,20 +89,8 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
             this.useTrackOrder,
             performance.now()
           );
-
-          if (identitiesChanged) {
-            this.trackLapDeltas(entries);
-          }
         },
         { fireImmediately: true }
-      )
-    );
-
-    // Lap times of another session say nothing about this one's laps.
-    this.disposers.push(
-      reaction(
-        () => this.root.session.sessionInfo?.currentSessionNum,
-        () => this.resetLapDeltas()
       )
     );
 
@@ -132,6 +100,14 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
       reaction(
         () => [this.activeClassIndex, this.settings.viewMode],
         () => this.scroll.resetScroll()
+      )
+    );
+
+    this.disposers.push(
+      reaction(
+        () => this.allClassGroups.length,
+        (totalClasses) => this.clampActiveClassIndex(totalClasses),
+        { fireImmediately: true }
       )
     );
 
@@ -170,6 +146,13 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
     return this.settings.useLivePositions;
   }
 
+  get useLiveTiming(): boolean {
+    return (
+      this.useTrackOrder &&
+      hasRaceStarted(this.root.session.session?.session_state ?? null)
+    );
+  }
+
   /** This instance's own settings — two tables may rank and filter differently. */
   get settings(): StandingsWidgetSettings {
     return this.root.liveWidgets.getSettings<StandingsWidgetSettings>(
@@ -198,56 +181,6 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
 
     this.order.dispose();
     this.scroll.resetScroll();
-    this.resetLapDeltas();
-  }
-
-  private trackLapDeltas(entries: CarIdentity[]) {
-    for (const entry of entries) {
-      const seen = this.seenLapTimes.get(entry.carIdx);
-
-      // The lap counter can drop when a car leaves the world and the
-      // backend falls back to the official completed-lap count.
-      if (seen && entry.lap < seen.lap) {
-        continue;
-      }
-
-      const sameLap = seen?.lap === entry.lap;
-      const consecutiveLap = seen && entry.lap === seen.lap + 1;
-      const previousTime = sameLap
-        ? seen.previousTime
-        : consecutiveLap
-          ? seen.time
-          : null;
-      const crossedInPit = sameLap ? seen.crossedInPit : entry.onPitRoad;
-      // At a pit-lane crossing iRacing can keep reporting the previous lap's
-      // time before clearing it, including when the driver serves a penalty.
-      const lapTime =
-        crossedInPit && entry.lastLapTime === previousTime
-          ? null
-          : entry.lastLapTime;
-
-      if (sameLap && lapTime === seen.time) {
-        continue;
-      }
-
-      if (lapTime !== null && previousTime !== null) {
-        this.lapDeltas.set(entry.carIdx, lapTime - previousTime);
-      } else {
-        this.lapDeltas.delete(entry.carIdx);
-      }
-
-      this.seenLapTimes.set(entry.carIdx, {
-        lap: entry.lap,
-        time: lapTime,
-        previousTime,
-        crossedInPit,
-      });
-    }
-  }
-
-  private resetLapDeltas() {
-    this.seenLapTimes.clear();
-    this.lapDeltas.clear();
   }
 
   /**
@@ -415,6 +348,12 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
     return result;
   }
 
+  gapLeaderOf(carClassId: number): CarIdentity | null {
+    return this.settings.viewMode === 'all'
+      ? this.overallLeader
+      : (this.classLeaders.get(carClassId) ?? null);
+  }
+
   get overallLeader(): CarIdentity | null {
     return (
       this.root.backendComputed.driverIdentities.find(
@@ -429,6 +368,17 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
     if (entries.length === 0) return [];
 
     const classMap = new Map<number, CarIdentity[]>();
+    const classSofMap = new Map<number, CarIdentity[]>();
+
+    for (const driver of this.root.backendComputed.driverIdentities) {
+      const existing = classSofMap.get(driver.carClassId);
+
+      if (existing) {
+        existing.push(driver);
+      } else {
+        classSofMap.set(driver.carClassId, [driver]);
+      }
+    }
 
     for (const driver of entries) {
       const existing = classMap.get(driver.carClassId);
@@ -462,9 +412,8 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
           classShortName: first.carClassShortName,
           classColor: first.carClassColor,
           totalDrivers: driversInClass.length,
-          classSof: computeClassSof(driversInClass),
+          classSof: computeClassSof(classSofMap.get(classId) ?? driversInClass),
           windowStartIndex: -1,
-          // Already in settled overall order, which within a class is the class order.
           drivers: driversInClass,
         };
       });
@@ -515,9 +464,13 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
     this.activeClassIndex = clamped === totalClasses - 1 ? 0 : clamped + 1;
   }
 
-  /** A class hotkey: steps through every class the session has entered. */
+  /** A class hotkey steps through the classes visible in the current table. */
   stepClass(direction: number) {
-    const totalClasses = this.root.backendComputed.carClassCount;
+    if (this.settings.viewMode !== 'cycling') {
+      return;
+    }
+
+    const totalClasses = this.allClassGroups.length;
 
     if (direction < 0) {
       this.cyclePrev(totalClasses);

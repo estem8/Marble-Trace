@@ -14,9 +14,7 @@ import {
   formatLapCell,
   formatLapDelta,
   formatPitStopTime,
-  calculateLapsBehind,
   getStandingsGap,
-  getStandingsInterval,
   maxScrollOffset,
   isPersonalBestLastLap,
   resolveBestLapDisplay,
@@ -181,24 +179,27 @@ describe('getStandingsGap', () => {
       resultsPositionTime: 20.9,
     });
 
-    expect(getStandingsGap(driver, classLeader, true, false, 0).value).toBe(
-      '8.5'
-    );
+    expect(getStandingsGap(driver, classLeader, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(8.5, 5),
+    });
   });
 
   it('leaves the overall view untouched', () => {
     const overallLeader = makeGapEntry({
       resultsPositionLap: 0,
       resultsPositionTime: 0,
+      livePosition: 1,
     });
     const driver = makeGapEntry({
       resultsPositionLap: 0,
       resultsPositionTime: 20.9,
     });
 
-    expect(getStandingsGap(driver, overallLeader, true, false, 0).value).toBe(
-      '20.9'
-    );
+    expect(getStandingsGap(driver, overallLeader, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(20.9, 5),
+    });
   });
 
   it('counts laps down from the class leader, not the overall one', () => {
@@ -211,19 +212,42 @@ describe('getStandingsGap', () => {
       resultsPositionTime: 0,
     });
 
-    expect(getStandingsGap(driver, classLeader, true, false, 0).value).toBe(
-      '1 L'
-    );
+    expect(getStandingsGap(driver, classLeader, { isRace: true })).toEqual({
+      kind: 'laps',
+      laps: 1,
+    });
   });
 
   it('re-bases the F2 fallback on the class leader too', () => {
     const classLeader = makeGapEntry({ f2Time: 5 });
     const driver = makeGapEntry({ f2Time: 9.2 });
 
-    expect(getStandingsGap(driver, classLeader, true, false, 0).value).toBe(
-      '4.2'
-    );
+    expect(getStandingsGap(driver, classLeader, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(4.2, 5),
+    });
   });
+
+  it.each([true, false])(
+    'uses F2 for matching result laps when one result time is missing (%s)',
+    (leaderTimeMissing) => {
+      const leader = makeGapEntry({
+        resultsPositionLap: 0,
+        resultsPositionTime: leaderTimeMissing ? null : 5,
+        f2Time: 5,
+      });
+      const driver = makeGapEntry({
+        resultsPositionLap: 0,
+        resultsPositionTime: leaderTimeMissing ? 9 : null,
+        f2Time: 9,
+      });
+
+      expect(getStandingsGap(driver, leader, { isRace: true })).toEqual({
+        kind: 'seconds',
+        seconds: expect.closeTo(4.0, 5),
+      });
+    }
+  );
 
   it('uses F2 for both cars when the reference result is missing', () => {
     const classLeader = makeGapEntry({ position: 5, f2Time: 10 });
@@ -233,13 +257,17 @@ describe('getStandingsGap', () => {
       f2Time: 12,
     });
 
-    expect(getStandingsGap(driver, classLeader, true, false, 0).value).toBe(
-      '2.0'
-    );
-    expect(getStandingsInterval(driver, classLeader, true).value).toBe('2.0');
+    expect(getStandingsGap(driver, classLeader, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(2.0, 5),
+    });
+    expect(getStandingsGap(driver, classLeader, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(2.0, 5),
+    });
   });
 
-  it('accepts zero F2 only for the telemetry leader when ranks diverge', () => {
+  it('uses the live F2 leader when official and live leaders differ', () => {
     const driver = makeGapEntry({ f2Time: 12 });
     const liveLeader = makeGapEntry({
       position: 2,
@@ -249,38 +277,318 @@ describe('getStandingsGap', () => {
     const officialLeader = makeGapEntry({
       position: 1,
       livePosition: 2,
-      f2Time: 0,
+      f2Time: null,
     });
 
-    expect(getStandingsGap(driver, liveLeader, true, false, 0).value).toBe(
-      '12.0'
-    );
+    expect(getStandingsGap(driver, liveLeader, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(12.0, 5),
+    });
+    expect(getStandingsGap(driver, officialLeader, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
+    expect(getStandingsGap(driver, null, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
+  });
+
+  it.each([0, -1])('ignores an invalid F2 reference of %s', (f2Time) => {
+    const driver = makeGapEntry({ f2Time: 12 });
+    const reference = makeGapEntry({ position: 1, livePosition: 2, f2Time });
+
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
+  });
+
+  it('uses the live lap gap when results still place the reference behind', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 1,
+      lap: 9,
+      lapDistPct: 0.4,
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 2,
+      lap: 10,
+      lapDistPct: 0.4,
+    });
+
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'laps',
+      laps: 1,
+    });
+  });
+
+  it('uses F2 when the results time still places the reference behind', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 5,
+      f2Time: 12,
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 10,
+      f2Time: 8,
+    });
+
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(4.0, 5),
+    });
+  });
+
+  it('keeps equal official result times empty instead of using F2', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 10,
+      f2Time: 12,
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 10,
+      f2Time: 8,
+    });
+
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
+  });
+
+  it('uses live progress over a stale results lap gap across the line', () => {
+    const driver = makeGapEntry({
+      lap: 10,
+      lapDistPct: 0.98,
+      estTime: 98,
+      classEstLapTime: 100,
+      resultsPositionLap: 1,
+    });
+    const reference = makeGapEntry({
+      lap: 11,
+      lapDistPct: 0.02,
+      estTime: 1.6,
+      classEstLapTime: 80,
+      resultsPositionLap: 0,
+    });
+
     expect(
-      getStandingsGap(driver, officialLeader, true, false, 0).isEmpty
-    ).toBe(true);
-    expect(getStandingsGap(driver, null, true, false, 0).isEmpty).toBe(true);
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(4.0, 5),
+    });
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'laps',
+      laps: 1,
+    });
+    expect(
+      getStandingsGap({ ...driver, estTime: 0 }, reference, {
+        isRace: true,
+        useLiveTiming: true,
+      })
+    ).toEqual({ kind: 'empty' });
+  });
+
+  it('does not show an interval to a car already behind in live progress', () => {
+    const driver = makeGapEntry({
+      lap: 10,
+      lapDistPct: 0.5,
+      f2Time: 12,
+    });
+    const reference = makeGapEntry({
+      lap: 10,
+      lapDistPct: 0.4,
+      f2Time: 8,
+    });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({
+      kind: 'empty',
+    });
+  });
+
+  it('uses a provisional results gap without two comparable finish times', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 5,
+      finishTiming: { lapsCompleted: 40, crossingTime: null, officialGap: 3 },
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 1,
+      finishTiming: { lapsCompleted: 40, crossingTime: 100, officialGap: null },
+    });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(4.0, 5),
+    });
+  });
+
+  it('uses provisional results instead of post-finish live progress', () => {
+    const driver = makeGapEntry({
+      lap: 41,
+      lapDistPct: 0.5,
+      estTime: 50,
+      resultsPositionLap: 0,
+      resultsPositionTime: 5,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+    const reference = makeGapEntry({
+      lap: 41,
+      lapDistPct: 0.4,
+      estTime: 40,
+      resultsPositionLap: 0,
+      resultsPositionTime: 1,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(4.0, 5),
+    });
+  });
+
+  it('does not use a live lap deficit after both cars finish on the same lap', () => {
+    const driver = makeGapEntry({
+      lap: 40,
+      lapDistPct: 0.1,
+      resultsPositionLap: null,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+    const reference = makeGapEntry({
+      lap: 42,
+      lapDistPct: 0.1,
+      resultsPositionLap: null,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({
+      kind: 'empty',
+    });
+  });
+
+  it('does not use stale result laps after both cars finish on the same lap', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 4,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 1,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
+  });
+
+  it('keeps the crossing gap until both official times are available', () => {
+    const driver = makeGapEntry({
+      f2Time: 130,
+      resultsPositionLap: 4,
+      finishTiming: { lapsCompleted: 40, crossingTime: 103.2, officialGap: 5 },
+    });
+    const reference = makeGapEntry({
+      f2Time: 20,
+      resultsPositionLap: 1,
+      finishTiming: { lapsCompleted: 40, crossingTime: 100, officialGap: null },
+    });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(3.2, 5),
+    });
+    expect(
+      getStandingsGap(
+        driver,
+        {
+          ...reference,
+          finishTiming: {
+            lapsCompleted: 40,
+            crossingTime: 100,
+            officialGap: 2,
+          },
+        },
+        { isRace: true, useLiveTiming: true }
+      )
+    ).toEqual({ kind: 'seconds', seconds: expect.closeTo(3.0, 5) });
+    expect(
+      getStandingsGap(
+        driver,
+        {
+          ...reference,
+          finishTiming: {
+            lapsCompleted: 41,
+            crossingTime: 100,
+            officialGap: 2,
+          },
+        },
+        { isRace: true, useLiveTiming: true }
+      )
+    ).toEqual({ kind: 'laps', laps: 1 });
   });
 
   it('names the leader instead of leaving a dash', () => {
     const leader = makeGapEntry({});
 
-    expect(getStandingsGap(leader, leader, true, true, 0)).toEqual({
-      value: 'LDR',
-      isLeader: true,
-      isEmpty: false,
+    expect(
+      getStandingsGap(leader, leader, { isRace: true, isLeader: true })
+    ).toEqual({
+      kind: 'leader',
     });
   });
 
   it('ignores missing distance when calculating lap deficits', () => {
-    const leader = { lap: 10, lapDistPct: 0.5 };
-    const driver = { lap: 10, lapDistPct: null };
+    const leader = makeGapEntry({ lap: 10, lapDistPct: 0.5 });
+    const driver = makeGapEntry({ lap: 8, lapDistPct: null });
 
-    expect(calculateLapsBehind(leader, driver)).toBe(0);
-    expect(calculateLapsBehind(driver, leader)).toBe(0);
+    expect(getStandingsGap(driver, leader, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
+    expect(getStandingsGap(leader, driver, { isRace: true })).toEqual({
+      kind: 'empty',
+    });
   });
 });
 
-describe('getStandingsInterval', () => {
+describe('using getStandingsGap for the interval', () => {
   it('measures the race gap against the car directly ahead', () => {
     const carAhead = makeGapEntry({
       resultsPositionLap: 0,
@@ -291,7 +599,10 @@ describe('getStandingsInterval', () => {
       resultsPositionTime: 13.1,
     });
 
-    expect(getStandingsInterval(driver, carAhead, true).value).toBe('0.7');
+    expect(getStandingsGap(driver, carAhead, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: expect.closeTo(0.7, 5),
+    });
   });
 
   it('counts a lap to the car ahead as a lap', () => {
@@ -304,14 +615,26 @@ describe('getStandingsInterval', () => {
       resultsPositionTime: 5,
     });
 
-    expect(getStandingsInterval(driver, carAhead, true).value).toBe('1 L');
+    expect(getStandingsGap(driver, carAhead, { isRace: true })).toEqual({
+      kind: 'laps',
+      laps: 1,
+    });
+  });
+
+  it('shows known lap gaps when result times are missing', () => {
+    const carAhead = makeGapEntry({ resultsPositionLap: 2 });
+    const driver = makeGapEntry({ resultsPositionLap: 4 });
+
+    expect(getStandingsGap(driver, carAhead, { isRace: true })).toEqual({
+      kind: 'laps',
+      laps: 2,
+    });
   });
 
   it('is empty, not a leader, for the car with nobody ahead', () => {
-    const interval = getStandingsInterval(makeGapEntry({}), null, true);
+    const interval = getStandingsGap(makeGapEntry({}), null, { isRace: true });
 
-    expect(interval.isLeader).toBe(false);
-    expect(interval.isEmpty).toBe(true);
+    expect(interval).toEqual({ kind: 'empty' });
   });
 });
 
@@ -354,7 +677,7 @@ describe('formatLapDelta', () => {
   });
 
   it('is a dash until two laps exist', () => {
-    expect(formatLapDelta(undefined)).toEqual({ value: '-', tone: 'even' });
+    expect(formatLapDelta(null)).toEqual({ value: '-', tone: 'even' });
   });
 });
 
