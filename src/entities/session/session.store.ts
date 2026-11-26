@@ -97,6 +97,14 @@ export class SessionStore {
     return isSessionEnded(this.session?.session_state ?? null);
   }
 
+  /** The race is accepting cars onto the starting grid. */
+  get isRaceGridding(): boolean {
+    return (
+      this.currentSessionType === 'Race' &&
+      this.session?.session_state === 'GetInCar'
+    );
+  }
+
   /**
    * Whether this is a team event. A computed boolean for the same reason as
    * `isSessionEnded`: the session info is replaced on every YAML update, and a

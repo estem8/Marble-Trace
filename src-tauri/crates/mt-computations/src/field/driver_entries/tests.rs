@@ -3591,6 +3591,176 @@ fn test_zeroed_positions_before_the_green_keep_the_grid_order() {
 }
 
 #[test]
+fn test_grid_position_does_not_change_when_a_car_ahead_loads() {
+    let session = two_car_race_session();
+    let start_positions = HashMap::from([(0, (2, 2)), (1, (1, 1))]);
+    let state = Mutex::new(DriverEntriesState::default());
+    let mut telemetry = two_car_frame(TrackSurface::NotInWorld, -1.0, 0.1);
+    telemetry.car_idx_position = vec![0, 0];
+    telemetry.car_idx_class_position = vec![0, 0];
+
+    let before = compute(
+        &telemetry,
+        &session,
+        &start_positions,
+        false,
+        Some(SessionState::ParadeLaps),
+        &state,
+    );
+    assert_eq!(player_entry(&before).live_position, 2);
+    assert_eq!(player_entry(&before).live_class_position, 2);
+    assert!(before.entries.iter().any(|entry| entry.car_idx == 1));
+
+    telemetry.car_idx_track_surface[1] = TrackSurface::OnTrack;
+    telemetry.car_idx_lap_dist_pct[1] = 0.2;
+    let after = compute(
+        &telemetry,
+        &session,
+        &start_positions,
+        false,
+        Some(SessionState::ParadeLaps),
+        &state,
+    );
+    assert_eq!(player_entry(&after).live_position, 2);
+    assert_eq!(player_entry(&after).live_class_position, 2);
+}
+
+#[test]
+fn test_official_grid_puts_unqualified_cars_in_irating_order() {
+    let mut session = unpublished_positions_session(SessionType::Race);
+    session.sessions[0].results_positions.clear();
+    session.cars[0].i_rating = 1500;
+    session.cars[1].i_rating = 2500;
+    session.cars[2].i_rating = 1000;
+    session.qualify_results = vec![QualifyResultEntry {
+        car_idx: 2,
+        position: 1,
+        fastest_time: Some(90.0),
+        ..Default::default()
+    }];
+    let mut telemetry = unpublished_positions_frame();
+    telemetry.car_idx_position = vec![0, 0, 0];
+    telemetry.car_idx_class_position = vec![0, 0, 0];
+    telemetry.car_idx_lap_dist_pct = vec![-1.0, -1.0, -1.0];
+    telemetry.car_idx_track_surface = vec![TrackSurface::NotInWorld; 3];
+    let grid = compute(
+        &telemetry,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::ParadeLaps),
+        &Mutex::new(DriverEntriesState::default()),
+    );
+    assert_eq!(
+        grid.entries
+            .iter()
+            .map(|entry| entry.car_idx)
+            .collect::<Vec<_>>(),
+        vec![2, 1, 0]
+    );
+    assert_eq!(player_entry(&grid).position, 3);
+    assert_eq!(player_entry(&grid).live_class_position, 3);
+}
+
+#[test]
+fn test_official_grid_without_qualifying_uses_irating() {
+    let mut session = two_car_race_session();
+    session.is_official = true;
+    session.cars[0].i_rating = 1500;
+    session.cars[1].i_rating = 2500;
+    let mut telemetry = two_car_frame(TrackSurface::NotInWorld, -1.0, -1.0);
+    telemetry.car_idx_position = vec![0, 0];
+    let grid = compute(
+        &telemetry,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::ParadeLaps),
+        &Mutex::new(DriverEntriesState::default()),
+    );
+    assert_eq!(
+        grid.entries
+            .iter()
+            .map(|entry| entry.car_idx)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn test_multiclass_grid_groups_classes_before_qualifying_and_irating() {
+    let mut session = unpublished_positions_session(SessionType::Race);
+    session.sessions[0].results_positions.clear();
+    session.cars[0].car_class_id = 1;
+    session.cars[0].car_class_est_lap_time = 90.0;
+    session.cars[0].i_rating = 1000;
+    session.cars[1].car_class_id = 2;
+    session.cars[1].car_class_est_lap_time = 110.0;
+    session.cars[1].i_rating = 2500;
+    session.cars[2].car_class_id = 2;
+    session.cars[2].car_class_est_lap_time = 110.0;
+    session.cars[2].i_rating = 1000;
+    session.qualify_results = vec![QualifyResultEntry {
+        car_idx: 2,
+        position: 1,
+        fastest_time: Some(100.0),
+        ..Default::default()
+    }];
+    let mut telemetry = unpublished_positions_frame();
+    telemetry.car_idx_position = vec![0, 0, 0];
+    telemetry.car_idx_lap_dist_pct = vec![-1.0; 3];
+    telemetry.car_idx_track_surface = vec![TrackSurface::NotInWorld; 3];
+    let grid = compute(
+        &telemetry,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::GetInCar),
+        &Mutex::new(DriverEntriesState::default()),
+    );
+    assert_eq!(
+        grid.entries
+            .iter()
+            .map(|entry| entry.car_idx)
+            .collect::<Vec<_>>(),
+        vec![0, 2, 1]
+    );
+    assert_eq!(
+        grid.entries
+            .iter()
+            .map(|entry| entry.live_class_position)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 2]
+    );
+}
+
+#[test]
+fn test_official_grid_uses_sim_results_when_available() {
+    let mut session = two_car_race_session();
+    session.is_official = true;
+    session.cars[0].i_rating = 2500;
+    session.cars[1].i_rating = 1000;
+    session.sessions[0].results_positions = vec![result_at(1, 1), result_at(0, 2)];
+    let telemetry = two_car_frame(TrackSurface::NotInWorld, -1.0, -1.0);
+    let positions = HashMap::from([(1, (1, 1)), (0, (2, 2))]);
+    let grid = compute(
+        &telemetry,
+        &session,
+        &positions,
+        false,
+        Some(SessionState::ParadeLaps),
+        &Mutex::new(DriverEntriesState::default()),
+    );
+    assert_eq!(
+        grid.entries
+            .iter()
+            .map(|entry| entry.car_idx)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+}
+
+#[test]
 fn test_player_in_the_garage_in_qualifying_keeps_the_place_set_by_time() {
     let session = unpublished_positions_session(SessionType::Qualify);
     let frame = compute_unpublished(

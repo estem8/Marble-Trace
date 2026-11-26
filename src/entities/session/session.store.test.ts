@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import type {
   SessionFrame,
+  SessionSnapshot,
   SessionState,
 } from '@shared/contracts/generated/bindings';
 
@@ -42,5 +43,25 @@ describe('SessionStore.isSessionEnded', () => {
     expect(runs).toBe(2);
 
     dispose();
+  });
+});
+
+describe('SessionStore.isRaceGridding', () => {
+  it('recognises GetInCar only in a race', () => {
+    const store = new SessionStore();
+    const info = (sessionType: 'Race' | 'Practice') =>
+      ({
+        currentSessionNum: 0,
+        sessions: [{ sessionType }],
+      }) as SessionSnapshot;
+
+    store.updateSessionInfo(info('Race'));
+    store.updateSession(frameIn('GetInCar'));
+    expect(store.isRaceGridding).toBe(true);
+    store.updateSession(frameIn('ParadeLaps'));
+    expect(store.isRaceGridding).toBe(false);
+    store.updateSessionInfo(info('Practice'));
+    store.updateSession(frameIn('GetInCar'));
+    expect(store.isRaceGridding).toBe(false);
   });
 });

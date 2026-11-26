@@ -120,6 +120,7 @@ export const DriverRow = observer(({ carIdx, index }: DriverRowProps) => {
 
   const state = driverRowStateOf(driver, {
     isSessionEnded: session.isSessionEnded,
+    isGridding: session.isRaceGridding,
     isPlayerTowing: player.isTowing,
   });
 

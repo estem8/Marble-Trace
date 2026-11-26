@@ -19,6 +19,8 @@ export interface DriverRowState {
 export interface DriverRowContext {
   /** The session is over: everybody drops to the garage, which is no longer a status. */
   isSessionEnded: boolean;
+  /** The race grid is still forming; an absent car may be waiting to grid. */
+  isGridding: boolean;
   /** The player's tow is counting down — the car sits in the stall, towed, not stopped. */
   isPlayerTowing: boolean;
 }
@@ -42,7 +44,8 @@ export const driverRowStateOf = (
   const isInGarage = driver.trackSurface === 'NotInWorld';
   const isOut =
     !isFinished &&
-    (driver.isRetired || (isInGarage && !context.isSessionEnded));
+    (driver.isRetired ||
+      (isInGarage && !context.isSessionEnded && !context.isGridding));
 
   return {
     isFinished,

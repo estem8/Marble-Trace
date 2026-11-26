@@ -25,6 +25,7 @@ const makeDriver = (overrides: Partial<CarIdentity> = {}): CarIdentity =>
 const RACING: DriverRowContext = {
   isSessionEnded: false,
   isPlayerTowing: false,
+  isGridding: false,
 };
 
 describe('driverRowStateOf', () => {
@@ -45,6 +46,21 @@ describe('driverRowStateOf', () => {
     expect(
       driverRowStateOf(inGarage, { ...RACING, isSessionEnded: true }).isOut
     ).toBe(false);
+  });
+
+  it('does not mark an unplaced car as in the garage while the grid is forming', () => {
+    const waiting = makeDriver({ trackSurface: 'NotInWorld' });
+
+    expect(
+      driverRowStateOf(waiting, { ...RACING, isGridding: true }).isOut
+    ).toBe(false);
+    expect(
+      driverRowStateOf(
+        { ...waiting, isRetired: true },
+        { ...RACING, isGridding: true }
+      ).isOut
+    ).toBe(true);
+    expect(driverRowStateOf(waiting, RACING).isOut).toBe(true);
   });
 
   it('lets a finish outrank retirement and the tow', () => {

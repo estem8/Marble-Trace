@@ -325,6 +325,11 @@ pub(super) fn compute_with_clock(
 
     let is_race = current_session.is_some_and(|s| s.session_type == SessionType::Race);
     let ranking_mode = resolve_ranking_mode(is_race, session_state);
+    let reconstruct_grid = ranking_mode == RankingMode::Grid
+        && session.is_official
+        && !session.team_racing
+        && results.is_empty()
+        && (!session.qualify_results.is_empty() || start_positions.is_empty());
 
     let mut qualify_times: HashMap<i32, f32> = HashMap::new();
 
@@ -356,7 +361,16 @@ pub(super) fn compute_with_clock(
                 return false;
             }
 
+            if reconstruct_grid {
+                return true;
+            }
+
             if results_positions_map.contains_key(&d.car_idx) {
+                return true;
+            }
+
+            // Keep grid slots occupied while their drivers are still loading.
+            if ranking_mode == RankingMode::Grid && start_positions.contains_key(&d.car_idx) {
                 return true;
             }
 
@@ -699,6 +713,7 @@ pub(super) fn compute_with_clock(
         RankingMode::TrackOrder => {
             assign_live_positions(&mut entries, &locked_state.race_timing.towed_cars)
         }
+        RankingMode::Grid if reconstruct_grid => assign_reconstructed_grid(&mut entries),
         RankingMode::Grid => assign_static_positions(&mut entries, grid_sort_key),
         RankingMode::Official => assign_static_positions(&mut entries, official_sort_key),
     }
@@ -1173,6 +1188,53 @@ fn assign_live_positions(entries: &mut [DriverEntry], towed_progress: &HashMap<i
     entries.clone_from_slice(&merged);
 
     number_positions(entries);
+}
+
+fn assign_reconstructed_grid(entries: &mut [DriverEntry]) {
+    let mut class_lap_times: HashMap<i32, f32> = HashMap::new();
+    for entry in entries.iter() {
+        let lap_time = entry.class_est_lap_time;
+        if lap_time.is_finite() && lap_time > 0.0 {
+            class_lap_times
+                .entry(entry.car_class_id)
+                .and_modify(|current| *current = current.min(lap_time))
+                .or_insert(lap_time);
+        }
+    }
+    entries.sort_by(|first, second| {
+        let first_class = class_lap_times
+            .get(&first.car_class_id)
+            .copied()
+            .unwrap_or(f32::MAX);
+        let second_class = class_lap_times
+            .get(&second.car_class_id)
+            .copied()
+            .unwrap_or(f32::MAX);
+        let class_order = first_class
+            .total_cmp(&second_class)
+            .then_with(|| first.car_class_id.cmp(&second.car_class_id));
+        if class_order != Ordering::Equal {
+            return class_order;
+        }
+
+        match (first.qualify_time, second.qualify_time) {
+            (Some(first_time), Some(second_time)) => first_time
+                .total_cmp(&second_time)
+                .then_with(|| grid_sort_key(first).cmp(&grid_sort_key(second)))
+                .then_with(|| first.car_idx.cmp(&second.car_idx)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => second
+                .i_rating
+                .cmp(&first.i_rating)
+                .then_with(|| first.car_idx.cmp(&second.car_idx)),
+        }
+    });
+    number_positions(entries);
+    for entry in entries.iter_mut() {
+        entry.position = entry.live_position;
+        entry.class_position = entry.live_class_position;
+    }
 }
 
 /// Orders the field by a key that does not depend on where the cars are on track —
