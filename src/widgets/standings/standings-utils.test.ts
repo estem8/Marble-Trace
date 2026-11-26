@@ -337,20 +337,36 @@ describe('getStandingsGap', () => {
     });
   });
 
-  it('keeps equal official result times empty instead of using F2', () => {
+  it.each([0, 10])('uses F2 when provisional results tie at %s', (time) => {
     const driver = makeGapEntry({
       resultsPositionLap: 0,
-      resultsPositionTime: 10,
+      resultsPositionTime: time,
       f2Time: 12,
     });
     const reference = makeGapEntry({
       resultsPositionLap: 0,
-      resultsPositionTime: 10,
+      resultsPositionTime: time,
       f2Time: 8,
     });
 
     expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
-      kind: 'empty',
+      kind: 'seconds',
+      seconds: 4,
+    });
+  });
+
+  it('keeps a confirmed zero finish gap when F2 disagrees', () => {
+    const finishTiming = {
+      lapsCompleted: 40,
+      crossingTime: null,
+      officialGap: 10,
+    };
+    const driver = makeGapEntry({ finishTiming, f2Time: 12 });
+    const reference = makeGapEntry({ finishTiming, f2Time: 8 });
+
+    expect(getStandingsGap(driver, reference, { isRace: true })).toEqual({
+      kind: 'seconds',
+      seconds: 0,
     });
   });
 

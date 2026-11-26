@@ -174,9 +174,10 @@ impl LapHistory {
             }
 
             // The sim can advance the lap counter before replacing the old time.
-            if in_world || time.is_some() {
-                self.time =
-                    time.filter(|time| results_confirm_time || Some(*time) != self.previous_time);
+            if let Some(time) =
+                time.filter(|time| results_confirm_time || Some(*time) != self.previous_time)
+            {
+                self.time = Some(time);
             }
         }
 
@@ -185,6 +186,11 @@ impl LapHistory {
             .flatten()
             .map(|(last, previous)| last - previous)
     }
+}
+
+struct InferredLapTiming {
+    completed: i32,
+    time_before_wrap: Option<f32>,
 }
 
 #[derive(Default)]
@@ -196,6 +202,8 @@ struct CarRaceState {
     last_in_world_laps: Option<i32>,
     display_laps: Option<i32>,
     lap_history: LapHistory,
+    last_live_lap_time: Option<f32>,
+    inferred_lap_timing: Option<InferredLapTiming>,
 }
 
 #[derive(Default)]
@@ -571,8 +579,32 @@ pub(super) fn compute_with_clock(
             let completed_lap_matches_result = live_laps_completed
                 .zip(result_laps)
                 .is_some_and(|(live, recorded)| live == recorded);
-            let live_lap_time_matches_count =
-                live_laps_completed.is_some() && live_laps_completed == laps_completed;
+            // Keep the wrap evidence while waiting for the last-lap time channel to update.
+            if let Some(completed) = pre_flag_wrap.filter(|&lap| Some(lap) == laps_completed) {
+                car.inferred_lap_timing = Some(InferredLapTiming {
+                    completed,
+                    time_before_wrap: car.last_live_lap_time,
+                });
+            } else if car
+                .inferred_lap_timing
+                .as_ref()
+                .is_some_and(|timing| Some(timing.completed) != laps_completed)
+            {
+                car.inferred_lap_timing = None;
+            }
+            if in_world && live_lap_time.is_some() {
+                car.last_live_lap_time = live_lap_time;
+            }
+            let inferred_lap_timing = car.inferred_lap_timing.as_ref().filter(|timing| {
+                live_laps_from_lap == Some(timing.completed)
+                    && live_lap == Some(timing.completed + 1)
+            });
+            let live_lap_time_matches_count = (live_laps_completed.is_some()
+                && live_laps_completed == laps_completed)
+                || inferred_lap_timing.is_some();
+            let live_lap_time = live_lap_time.filter(|time| {
+                inferred_lap_timing.is_none_or(|timing| timing.time_before_wrap != Some(*time))
+            });
             let current_result_time = result_laps
                 .zip(laps_completed)
                 .filter(|(result, completed)| result == completed)

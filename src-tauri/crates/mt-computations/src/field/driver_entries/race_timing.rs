@@ -67,22 +67,30 @@ impl RaceTiming {
                 })
                 .map(|entry| entry.car_idx)
                 .collect();
-            let eligible_to_lead =
+            let eligible_to_cross =
                 |entry: &DriverEntry| eligible_car_indices.contains(&entry.car_idx);
+            // The leading lap still counts while its driver is on pit road.
+            let can_set_leading_lap = |entry: &DriverEntry| {
+                eligible_to_cross(entry)
+                    || (!entry.is_retired
+                        && !entry.is_towed
+                        && entry.on_pit_road
+                        && entry.track_surface != TrackSurface::NotInWorld)
+            };
             let leader_laps = entries
                 .iter()
-                .filter(|entry| eligible_to_lead(entry))
+                .filter(|entry| can_set_leading_lap(entry))
                 .map(|entry| completed_laps_for_finish(entry, self))
                 .max()
                 .unwrap_or(0);
             let leader_before = entries
                 .iter()
-                .filter(|entry| eligible_to_lead(entry))
+                .filter(|entry| can_set_leading_lap(entry))
                 .filter(|entry| {
                     self.previous_location.get(&entry.car_idx).is_some_and(
                         |(surface, on_pit_road)| {
-                            !on_pit_road
-                                && matches!(surface, TrackSurface::OnTrack | TrackSurface::OffTrack)
+                            matches!(surface, TrackSurface::OnTrack | TrackSurface::OffTrack)
+                                || (*on_pit_road && *surface != TrackSurface::NotInWorld)
                         },
                     )
                 })
@@ -91,7 +99,7 @@ impl RaceTiming {
                 .unwrap_or(leader_laps);
             let leader_crossing_laps: Vec<i32> = entries
                 .iter()
-                .filter(|entry| eligible_to_lead(entry))
+                .filter(|entry| eligible_to_cross(entry))
                 .filter(|entry| {
                     self.previous_laps
                         .get(&entry.car_idx)
@@ -168,28 +176,28 @@ impl RaceTiming {
                 finish_samples.insert(entry.car_idx, sample);
             }
 
-            let flag_crossing_time = flag_crossing
-                .then(|| {
-                    let crossing_car_times: Vec<f64> = entries
-                        .iter()
-                        .filter(|entry| eligible_to_lead(entry))
-                        .filter(|entry| completed_laps_for_finish(entry, self) == flag_laps)
-                        .filter(|entry| {
-                            self.previous_laps
-                                .get(&entry.car_idx)
-                                .is_some_and(|&laps| laps < flag_laps)
-                        })
-                        .map(|entry| crossing_times.get(&entry.car_idx).copied())
-                        .collect::<Option<Vec<_>>>()
-                        .unwrap_or_default();
+            let mut flag_time_upper_bound: Option<f64> = None;
+            let mut all_flag_crossings_timed = true;
+            if flag_crossing {
+                let flag_crossers = entries
+                    .iter()
+                    .filter(|entry| eligible_to_cross(entry))
+                    .filter(|entry| completed_laps_for_finish(entry, self) == flag_laps)
+                    .filter(|entry| {
+                        self.previous_laps
+                            .get(&entry.car_idx)
+                            .is_some_and(|&laps| laps < flag_laps)
+                    });
 
-                    if crossing_car_times.is_empty() {
-                        None
+                for entry in flag_crossers {
+                    if let Some(&time) = crossing_times.get(&entry.car_idx) {
+                        flag_time_upper_bound =
+                            Some(flag_time_upper_bound.map_or(time, |bound| bound.min(time)));
                     } else {
-                        crossing_car_times.into_iter().min_by(f64::total_cmp)
+                        all_flag_crossings_timed = false;
                     }
-                })
-                .flatten();
+                }
+            }
 
             let state = &mut *self;
 
@@ -252,14 +260,18 @@ impl RaceTiming {
                 let classified = race_has_ended && !entry.is_retired && started;
 
                 let crossing_time = crossing_times.get(&entry.car_idx).copied();
+                // With partial evidence, an untimed leader may have crossed earlier.
+                let before_flag_bound = crossing_time
+                    .zip(flag_time_upper_bound)
+                    .map(|(time, bound)| time < bound);
                 let crossed_before_flag = crossing_evidence
-                    && flag_crossing_time
-                        .zip(crossing_time)
-                        .is_some_and(|(flag_time, car_time)| car_time < flag_time);
+                    && all_flag_crossings_timed
+                    && before_flag_bound == Some(true);
                 let crossing_order_unknown = flag_crossing
                     && crossing_evidence
                     && completed < flag_laps
-                    && (flag_crossing_time.is_none() || crossing_time.is_none());
+                    && (before_flag_bound.is_none()
+                        || (!all_flag_crossings_timed && before_flag_bound == Some(true)));
 
                 let finisher_crossed = crossing_evidence
                     && !entry.is_retired

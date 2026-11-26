@@ -529,6 +529,72 @@ fn test_a_lapped_car_crossing_before_the_flag_in_the_same_tick_stays_unfinished(
 }
 
 #[test]
+fn a_car_catching_the_leader_on_pit_road_does_not_arm_the_flag() {
+    let session = two_car_race_session();
+    let state = Mutex::new(DriverEntriesState::default());
+    let mut live = trailing_and_leading_frame(20, 21);
+    live.car_idx_on_pit_road[1] = true;
+    let sample = |live: &CarIdxFrame| {
+        compute(
+            live,
+            &session,
+            &HashMap::new(),
+            false,
+            Some(SessionState::Checkered),
+            &state,
+        )
+    };
+    sample(&live);
+
+    live.car_idx_lap[0] = 21;
+    live.car_idx_laps_completed[0] = 20;
+    assert!(!player_entry(&sample(&live)).is_finished);
+
+    live.car_idx_lap[0] = 22;
+    live.car_idx_laps_completed[0] = 21;
+    assert!(player_entry(&sample(&live)).is_finished);
+}
+
+#[test]
+fn a_timed_leader_crossing_bounds_the_flag_when_another_sample_is_missing() {
+    let mut session = two_car_race_session();
+    session.cars.push(CarEntry {
+        car_idx: 2,
+        ..Default::default()
+    });
+
+    for (trailing_progress, finished) in [(0.98, true), (0.995, false)] {
+        let state = Mutex::new(DriverEntriesState::default());
+        let mut live = trailing_and_leading_frame(12, 13);
+        live.car_idx_position.push(3);
+        live.car_idx_track_surface.push(TrackSurface::OnTrack);
+        live.car_idx_lap.push(13);
+        live.car_idx_laps_completed.push(12);
+        live.car_idx_lap_dist_pct = vec![trailing_progress, 0.99, -1.0];
+        let sample = |live: &CarIdxFrame, time| {
+            compute_with_clock(
+                live,
+                &session,
+                &HashMap::new(),
+                false,
+                Some(SessionState::Checkered),
+                &state,
+                Some(time),
+            )
+        };
+        sample(&live, 10.0);
+
+        live.car_idx_lap = vec![13, 14, 14];
+        live.car_idx_laps_completed = vec![12, 13, 13];
+        live.car_idx_lap_dist_pct = vec![0.01, 0.01, 0.01];
+        let frame = sample(&live, 10.1);
+        let trailing = player_entry(&frame);
+        assert_eq!(trailing.is_finished, finished);
+        assert_eq!(trailing.finish_timing.is_some(), finished);
+    }
+}
+
+#[test]
 fn test_unknown_same_tick_crossing_order_waits_for_later_evidence() {
     let session = two_car_race_session();
     let state = Mutex::new(DriverEntriesState::default());
@@ -2590,6 +2656,51 @@ fn trailing_car_without_completed_counter_finishes_on_wrap_after_flag() {
         &state,
     );
     assert!(player_entry(&finished).is_finished);
+}
+
+#[test]
+fn lap_delta_keeps_an_accepted_time_through_missing_samples() {
+    let mut history = LapHistory::default();
+    assert_eq!(history.observe(7, Some(89.0), false, true), None);
+    assert_eq!(history.observe(8, Some(90.0), false, true), Some(1.0));
+    assert_eq!(history.observe(8, None, false, true), Some(1.0));
+    assert_eq!(history.observe(8, Some(89.0), false, true), Some(1.0));
+    assert_eq!(history.observe(9, Some(91.0), false, true), Some(1.0));
+}
+
+#[test]
+fn accepts_fresh_lap_times_after_wraps_without_a_completed_counter() {
+    let session = race_session();
+    let state = Mutex::new(DriverEntriesState::default());
+    let mut live = racing_car_idx_frame_on_lap(0, 8);
+    live.car_idx_laps_completed.clear();
+
+    let mut sample = |lap, progress, time| {
+        live.car_idx_lap[0] = lap;
+        live.car_idx_lap_dist_pct[0] = progress;
+        live.car_idx_last_lap_time[0] = time;
+        let frame = compute(
+            &live,
+            &session,
+            &HashMap::new(),
+            false,
+            Some(SessionState::Racing),
+            &state,
+        );
+        let entry = player_entry(&frame);
+        (
+            entry.laps_completed,
+            entry.last_lap_time,
+            entry.last_lap_delta,
+        )
+    };
+
+    assert_eq!(sample(8, 0.95, 89.0), (7, None, None));
+    assert_eq!(sample(9, 0.01, 89.0), (8, None, None));
+    assert_eq!(sample(9, 0.02, 90.0), (8, Some(90.0), None));
+    assert_eq!(sample(9, 0.95, 90.0), (8, Some(90.0), None));
+    assert_eq!(sample(10, 0.01, 91.0), (9, Some(91.0), Some(1.0)));
+    assert_eq!(sample(12, 0.2, 92.0), (11, None, None));
 }
 
 #[test]

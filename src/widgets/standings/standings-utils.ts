@@ -697,10 +697,6 @@ export const getStandingsGap = (
       if (timeDiff > 0) {
         return { kind: 'seconds', seconds: timeDiff };
       }
-
-      if (timeDiff === 0) {
-        return EMPTY_GAP;
-      }
     }
   }
 
