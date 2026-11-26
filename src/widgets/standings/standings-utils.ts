@@ -719,7 +719,9 @@ export const getStandingsGap = (
     return finishGap;
   }
 
-  if (useLiveTiming) {
+  const bothFinished = Boolean(driver.finishTiming && leader.finishTiming);
+
+  if (useLiveTiming && !bothFinished) {
     const liveGap = getLiveRaceGap(driver, leader);
 
     if (liveGap) {
@@ -751,7 +753,7 @@ export const getStandingsGap = (
       lapProgressOf(driver) !== null &&
       lapProgressOf(leader) !== null;
 
-    if (lapsDown > 0 && !hasLiveProgress) {
+    if (lapsDown > 0 && !bothFinished && !hasLiveProgress) {
       return { value: `${lapsDown} L`, isLeader: false, isEmpty: false };
     }
 
@@ -761,12 +763,16 @@ export const getStandingsGap = (
       if (timeDiff > 0) {
         return { value: timeDiff.toFixed(1), isLeader: false, isEmpty: false };
       }
+
+      if (timeDiff === 0) {
+        return emptyGap();
+      }
     }
   }
 
   // Results can lag behind a live position change. `lapsBehind` is already
   // measured against the reference row.
-  if (lapsBehind >= 1) {
+  if (!bothFinished && lapsBehind >= 1) {
     return { value: `${lapsBehind} L`, isLeader: false, isEmpty: false };
   }
 

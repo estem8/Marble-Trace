@@ -203,6 +203,8 @@ export class StandingsOrderStore {
     const claims = new Map<string, number>();
     const immediate = new Set<number>();
 
+    const classClaims = new Map<string, number>();
+
     for (const [carIdx, pending] of this.pending) {
       const { rank, classId } = pending;
       const previousRank = this.settled.get(carIdx);
@@ -211,16 +213,138 @@ export class StandingsOrderStore {
         claims.set(key, (claims.get(key) ?? 0) + 1);
       }
 
+      if (rank.inClass > 0) {
+        const classKey = `${classId}:${rank.inClass}`;
+        classClaims.set(classKey, (classClaims.get(classKey) ?? 0) + 1);
+      }
+
       if (now - pending.since >= ORDER_SETTLE_MS) {
         ready.set(carIdx, pending);
       }
 
       if (
         !isPlaced(previousRank?.overall ?? 0) ||
-        (!isPlaced(previousRank?.inClass ?? 0) && isPlaced(rank.inClass)) ||
         this.classIds.get(carIdx) !== classId
       ) {
         immediate.add(carIdx);
+      }
+    }
+
+    const uniqueClassMoves = new Set<number>();
+
+    for (const [carIdx, { rank, classId }] of this.pending) {
+      const settled = this.settled.get(carIdx);
+      const classKey = `${classId}:${rank.inClass}`;
+
+      if (
+        settled &&
+        (settled.overall === 0 ||
+          settled.inClass === 0 ||
+          rank.inClass === 0) &&
+        settled.inClass !== rank.inClass &&
+        (rank.inClass === 0 || (classClaims.get(classKey) ?? 0) === 1)
+      ) {
+        uniqueClassMoves.add(carIdx);
+      }
+    }
+
+    let classMoveRemoved = true;
+
+    while (classMoveRemoved) {
+      classMoveRemoved = false;
+
+      for (const carIdx of uniqueClassMoves) {
+        const pending = this.pending.get(carIdx);
+
+        if (!pending) {
+          uniqueClassMoves.delete(carIdx);
+          classMoveRemoved = true;
+          continue;
+        }
+
+        const classKey = `${pending.classId}:${pending.rank.inClass}`;
+        const blocked =
+          pending.rank.inClass > 0 &&
+          [...(this.occupants.get(classKey) ?? [])].some(
+            (occupant) => occupant !== carIdx && !uniqueClassMoves.has(occupant)
+          );
+
+        if (blocked) {
+          uniqueClassMoves.delete(carIdx);
+          classMoveRemoved = true;
+        }
+      }
+    }
+
+    const uniqueOverallMoves = new Set<number>();
+
+    for (const [carIdx, { rank }] of this.pending) {
+      const settled = this.settled.get(carIdx);
+
+      if (
+        settled &&
+        settled.overall === 0 &&
+        rank.overall > 0 &&
+        (claims.get(String(rank.overall)) ?? 0) === 1
+      ) {
+        uniqueOverallMoves.add(carIdx);
+      }
+    }
+
+    let overallMoveRemoved = true;
+
+    while (overallMoveRemoved) {
+      overallMoveRemoved = false;
+
+      for (const carIdx of uniqueOverallMoves) {
+        const pending = this.pending.get(carIdx);
+
+        if (!pending) {
+          uniqueOverallMoves.delete(carIdx);
+          overallMoveRemoved = true;
+          continue;
+        }
+
+        const blocked = [
+          ...(this.occupants.get(String(pending.rank.overall)) ?? []),
+        ].some(
+          (occupant) => occupant !== carIdx && !uniqueOverallMoves.has(occupant)
+        );
+
+        if (blocked) {
+          uniqueOverallMoves.delete(carIdx);
+          overallMoveRemoved = true;
+        }
+      }
+    }
+
+    const partialMoves = new Set([...uniqueClassMoves, ...uniqueOverallMoves]);
+
+    for (const carIdx of partialMoves) {
+      const settled = this.settled.get(carIdx);
+
+      if (settled) {
+        this.releaseRanks(carIdx, settled);
+      }
+    }
+
+    for (const carIdx of partialMoves) {
+      const pending = this.pending.get(carIdx);
+      const settled = this.settled.get(carIdx);
+
+      if (pending && settled) {
+        this.setRank(
+          carIdx,
+          {
+            overall: uniqueOverallMoves.has(carIdx)
+              ? pending.rank.overall
+              : settled.overall,
+            inClass: uniqueClassMoves.has(carIdx)
+              ? pending.rank.inClass
+              : settled.inClass,
+          },
+          pending.classId
+        );
       }
     }
 

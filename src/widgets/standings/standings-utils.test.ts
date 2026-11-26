@@ -315,6 +315,23 @@ describe('getStandingsGap', () => {
     );
   });
 
+  it('keeps equal official result times empty instead of using F2', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 10,
+      f2Time: 12,
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 0,
+      resultsPositionTime: 10,
+      f2Time: 8,
+    });
+
+    expect(getStandingsGap(driver, reference, true, false, 0).isEmpty).toBe(
+      true
+    );
+  });
+
   it('uses live progress over a stale results lap gap across the line', () => {
     const driver = makeGapEntry({
       lap: 10,
@@ -372,6 +389,87 @@ describe('getStandingsGap', () => {
 
     expect(getStandingsInterval(driver, reference, true, true).value).toBe(
       '4.0'
+    );
+  });
+
+  it('uses provisional results instead of post-finish live progress', () => {
+    const driver = makeGapEntry({
+      lap: 41,
+      lapDistPct: 0.5,
+      estTime: 50,
+      resultsPositionLap: 0,
+      resultsPositionTime: 5,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+    const reference = makeGapEntry({
+      lap: 41,
+      lapDistPct: 0.4,
+      estTime: 40,
+      resultsPositionLap: 0,
+      resultsPositionTime: 1,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+
+    expect(getStandingsGap(driver, reference, true, false, 0, true).value).toBe(
+      '4.0'
+    );
+  });
+
+  it('does not use a live lap deficit after both cars finish on the same lap', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: null,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: null,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+
+    expect(
+      getStandingsGap(driver, reference, true, false, 1, true).isEmpty
+    ).toBe(true);
+  });
+
+  it('does not use stale result laps after both cars finish on the same lap', () => {
+    const driver = makeGapEntry({
+      resultsPositionLap: 4,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+    const reference = makeGapEntry({
+      resultsPositionLap: 1,
+      resultsPositionTime: null,
+      finishTiming: {
+        lapsCompleted: 40,
+        crossingTime: null,
+        officialGap: null,
+      },
+    });
+
+    expect(getStandingsGap(driver, reference, true, false, 0).isEmpty).toBe(
+      true
     );
   });
 

@@ -70,6 +70,123 @@ describe('StandingsOrderStore', () => {
     }
   });
 
+  it('settles unique class positions while overall positions remain contested', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1), entry(2, 1)], true, 0);
+      order.process([entry(1, 1, 1), entry(2, 1, 2)], true, 100);
+
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 0, inClass: 1 });
+      expect(order.renderedRanks.get(2)).toEqual({ overall: 0, inClass: 2 });
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('does not settle a class move whose dependency is blocked', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process(
+        [entry(1, 1, 1), entry(2, 1, 2), entry(3, 1, 3), entry(4, 1, 4)],
+        true,
+        0
+      );
+      order.process(
+        [entry(1, 1, 2), entry(2, 1, 3), entry(3, 1, 4), entry(4, 1, 4)],
+        true,
+        100
+      );
+
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 0, inClass: 1 });
+      expect(order.renderedRanks.get(2)).toEqual({ overall: 0, inClass: 2 });
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('waits for the settle delay when an already-ranked car gets a class rank', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 0), entry(2, 2, 2)], true, 0);
+      order.process([entry(1, 2, 1), entry(2, 1, 2)], true, 100);
+
+      expect(order.renderedRanks.get(1)?.overall).toBe(1);
+      expect(order.renderedRanks.get(2)?.overall).toBe(2);
+
+      order.process(null, true, 999);
+      expect(order.renderedRanks.get(1)?.overall).toBe(1);
+      order.process(null, true, 1000);
+      expect(order.renderedRanks.get(1)?.overall).toBe(2);
+      expect(order.renderedRanks.get(2)?.overall).toBe(1);
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('settles class ranks around an occupied overall rank independently', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 1), entry(2, 2, 2), entry(3, 2, 3)], true, 0);
+      order.process(
+        [entry(1, 1, 1), entry(2, 1, 3), entry(3, 3, 2)],
+        true,
+        100
+      );
+
+      expect(order.renderedRanks.get(2)).toEqual({ overall: 0, inClass: 3 });
+      expect(order.renderedRanks.get(3)).toEqual({ overall: 3, inClass: 2 });
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('settles unique overall positions while class positions remain contested', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 1), entry(2, 1, 1)], true, 0);
+      order.process([entry(1, 1, 1), entry(2, 2, 1)], true, 100);
+
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 1, inClass: 0 });
+      expect(order.renderedRanks.get(2)).toEqual({ overall: 2, inClass: 0 });
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('settles unset class ranks after overall ranks already settle', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 1), entry(2, 1, 1)], true, 0);
+      order.process([entry(1, 1, 1), entry(2, 2, 1)], true, 100);
+      order.process([entry(1, 1, 1), entry(2, 1, 2)], true, 200);
+
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 1, inClass: 1 });
+      expect(order.renderedRanks.get(2)).toEqual({ overall: 2, inClass: 2 });
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('releases a class rank so another car can take it with overall ranks contested', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 1), entry(2, 1, 2)], true, 0);
+      order.process([entry(1, 1, 0), entry(2, 1, 1)], true, 100);
+
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 0, inClass: 0 });
+      expect(order.renderedRanks.get(2)).toEqual({ overall: 0, inClass: 1 });
+    } finally {
+      order.dispose();
+    }
+  });
+
   it('places a newly ranked car without changing the timer of an unrelated swap', () => {
     const order = new StandingsOrderStore();
 

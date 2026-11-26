@@ -281,7 +281,11 @@ impl<'a> QuestionSource<'a> {
             CarField::GapToLeader => {
                 let leader = self.class_leader_of(car)?.entry;
 
-                Some(measured((entry.f2_time? - leader.f2_time?).max(0.0)))
+                if entry.car_idx == leader.car_idx {
+                    Some(measured(0.0))
+                } else {
+                    Some(measured((entry.f2_time? - leader.f2_time?).max(0.0)))
+                }
             }
             CarField::LapDeltaToMe => {
                 let mine = self.me()?.entry.last_lap_time.filter(|lap| *lap > 0.0)?;
@@ -773,6 +777,27 @@ mod tests {
         assert_eq!(number(&me[0], "gapToLeader"), Some(12.5));
         assert!(number(&ahead[0], "lapDeltaToMe").is_some_and(|delta| (delta + 0.3).abs() < 1e-4));
         assert!(number(&ahead[0], "lastLap").is_some());
+    }
+
+    #[test]
+    fn class_leader_has_a_zero_gap_without_f2_timing() {
+        let (mut view, session) = race();
+        view.entries
+            .iter_mut()
+            .find(|entry| entry.car_idx == 1)
+            .unwrap()
+            .f2_time = None;
+        let source = QuestionSource {
+            view: &view,
+            session: Some(&session),
+        };
+        let replies = source.answer(
+            "leader",
+            Some(&AskedCar::ClassLeader),
+            &[car(CarField::GapToLeader)],
+        );
+
+        assert_eq!(number(&replies[0], "gapToLeader"), Some(0.0));
     }
 
     #[test]
