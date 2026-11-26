@@ -561,6 +561,34 @@ describe('StandingsWidgetStore — per instance', () => {
     expect(table.lapDeltas.get(driver.carIdx)).toBe(-2);
   });
 
+  it('clears the previous delta when an in-world lap counter resets to zero', () => {
+    const frame = core.backendComputed.driverEntries!;
+    const [driver] = frame.entries;
+    const publish = (
+      lapsCompleted: number,
+      lastLapTime: number | null,
+      trackSurface: typeof driver.trackSurface = 'OnTrack'
+    ) =>
+      runInAction(() =>
+        core.backendComputed.updateDriverEntries({
+          ...frame,
+          entries: [{ ...driver, trackSurface, lapsCompleted, lastLapTime }],
+        })
+      );
+
+    publish(11, 90);
+    const table = openTable(core, STANDINGS);
+    publish(12, 92);
+    expect(table.lapDeltas.get(driver.carIdx)).toBe(2);
+    publish(0, null, 'NotInWorld');
+    expect(table.lapDeltas.get(driver.carIdx)).toBe(2);
+    publish(0, null);
+    expect(table.lapDeltas.has(driver.carIdx)).toBe(false);
+    publish(1, 95);
+    publish(2, 94);
+    expect(table.lapDeltas.get(driver.carIdx)).toBe(-1);
+  });
+
   it('accepts an identical pit-lane lap once the result confirms its time', () => {
     const frame = core.backendComputed.driverEntries!;
     const driver = frame.entries.find((entry) => entry.isPlayer)!;

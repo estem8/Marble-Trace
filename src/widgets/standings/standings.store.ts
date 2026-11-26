@@ -217,14 +217,20 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
 
   private trackLapDeltas(entries: CarIdentity[]) {
     for (const entry of entries) {
-      const seen = this.seenLapTimes.get(entry.carIdx);
+      const previous = this.seenLapTimes.get(entry.carIdx);
       const lapIdentifier = entry.lapsCompleted;
 
       // The completed-lap count can fall back to older results when a car leaves.
-      if (seen && lapIdentifier < seen.lap) {
-        continue;
+      if (previous && lapIdentifier < previous.lap) {
+        if (lapIdentifier !== 0 || entry.trackSurface === 'NotInWorld') {
+          continue;
+        }
+
+        this.lapDeltas.delete(entry.carIdx);
+        this.seenLapTimes.delete(entry.carIdx);
       }
 
+      const seen = this.seenLapTimes.get(entry.carIdx);
       const sameLap = seen?.lap === lapIdentifier;
       const consecutiveLap = seen && lapIdentifier === seen.lap + 1;
       const previousTime = sameLap
