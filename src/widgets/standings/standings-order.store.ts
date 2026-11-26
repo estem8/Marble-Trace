@@ -106,15 +106,16 @@ export class StandingsOrderStore {
   reset() {
     this.clearRanks();
     this.previousPositions.clear();
-  }
 
-  dispose() {
     for (const timer of this.changeTimers.values()) {
       clearTimeout(timer);
     }
 
     this.changeTimers.clear();
     this.positionChanges.clear();
+  }
+
+  dispose() {
     this.reset();
   }
 
@@ -143,12 +144,35 @@ export class StandingsOrderStore {
         this.settled.delete(carIdx);
         this.classIds.delete(carIdx);
         this.pending.delete(carIdx);
+        this.previousPositions.delete(carIdx);
+        clearTimeout(this.changeTimers.get(carIdx));
+        this.changeTimers.delete(carIdx);
+        this.positionChanges.delete(carIdx);
       }
     }
 
     if (this.settled.size === 0) {
+      const claims = new Map<string, number>();
+
+      for (const { rank, classId } of next.values()) {
+        for (const key of rankKeys(rank, classId)) {
+          claims.set(key, (claims.get(key) ?? 0) + 1);
+        }
+      }
+
       for (const [carIdx, { rank, classId }] of next) {
-        this.setRank(carIdx, rank, classId);
+        this.setRank(
+          carIdx,
+          {
+            overall:
+              (claims.get(String(rank.overall)) ?? 0) > 1 ? 0 : rank.overall,
+            inClass:
+              (claims.get(`${classId}:${rank.inClass}`) ?? 0) > 1
+                ? 0
+                : rank.inClass,
+          },
+          classId
+        );
       }
 
       return;
@@ -201,6 +225,103 @@ export class StandingsOrderStore {
         this.classIds.get(carIdx) !== classId
       ) {
         immediate.add(carIdx);
+      }
+    }
+
+    const uniqueClassMoves = new Set<number>();
+
+    for (const [carIdx, { rank, classId }] of this.pending) {
+      const settled = this.settled.get(carIdx);
+      const classKey = `${classId}:${rank.inClass}`;
+
+      if (
+        settled &&
+        this.classIds.get(carIdx) === classId &&
+        (settled.overall === 0 ||
+          settled.inClass === 0 ||
+          rank.inClass === 0) &&
+        settled.inClass !== rank.inClass &&
+        (rank.inClass === 0 || claims.get(classKey) === 1)
+      ) {
+        uniqueClassMoves.add(carIdx);
+      }
+    }
+
+    let classMoveRemoved = true;
+
+    while (classMoveRemoved) {
+      classMoveRemoved = false;
+
+      for (const carIdx of uniqueClassMoves) {
+        const pending = this.pending.get(carIdx);
+
+        if (!pending) {
+          uniqueClassMoves.delete(carIdx);
+          classMoveRemoved = true;
+          continue;
+        }
+
+        const classKey = `${pending.classId}:${pending.rank.inClass}`;
+        const blocked =
+          pending.rank.inClass > 0 &&
+          [...(this.occupants.get(classKey) ?? [])].some(
+            (occupant) => occupant !== carIdx && !uniqueClassMoves.has(occupant)
+          );
+
+        if (blocked) {
+          uniqueClassMoves.delete(carIdx);
+          classMoveRemoved = true;
+        }
+      }
+    }
+
+    const uniqueOverallMoves = new Set<number>();
+
+    for (const [carIdx, { rank }] of this.pending) {
+      const settled = this.settled.get(carIdx);
+      const overallKey = String(rank.overall);
+
+      if (
+        settled &&
+        settled.overall === 0 &&
+        rank.overall > 0 &&
+        claims.get(overallKey) === 1 &&
+        !this.occupants.has(overallKey)
+      ) {
+        uniqueOverallMoves.add(carIdx);
+      }
+    }
+
+    const partialMoves = new Set([...uniqueClassMoves, ...uniqueOverallMoves]);
+
+    for (const carIdx of partialMoves) {
+      const settled = this.settled.get(carIdx);
+
+      if (settled) {
+        this.releaseRanks(carIdx, settled);
+      }
+    }
+
+    for (const carIdx of partialMoves) {
+      const pending = this.pending.get(carIdx);
+      const settled = this.settled.get(carIdx);
+
+      if (pending && settled) {
+        const movesOverall = uniqueOverallMoves.has(carIdx);
+        this.setRank(
+          carIdx,
+          {
+            overall: movesOverall ? pending.rank.overall : settled.overall,
+            inClass: uniqueClassMoves.has(carIdx)
+              ? pending.rank.inClass
+              : settled.inClass,
+          },
+          this.classIds.get(carIdx) ?? pending.classId
+        );
+
+        if (movesOverall) {
+          this.clearArrowAfterMove(carIdx);
+        }
       }
     }
 

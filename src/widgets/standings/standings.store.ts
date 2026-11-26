@@ -245,13 +245,14 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
   /** Field ordered by the debounced positions — the order the table renders. */
   get orderedEntries(): CarIdentity[] {
     const entries = this.visibleEntries;
+    const rankField = this.settings.viewMode === 'all' ? 'overall' : 'inClass';
 
     // The sort is stable and `visibleEntries` keeps the backend's order, so
     // unplaced cars stay in that order among themselves.
     return [...entries].sort((first, second) =>
       compareRanks(
-        this.renderedRankOf(first).overall,
-        this.renderedRankOf(second).overall
+        this.renderedRankOf(first)[rankField],
+        this.renderedRankOf(second)[rankField]
       )
     );
   }

@@ -229,7 +229,17 @@ describe('StandingsWidgetStore — per instance', () => {
     );
 
     expect(group).toBeDefined();
-    expect(group?.classSof).toBe(computeClassSof(classRoster));
+    expect(group?.drivers.some((entry) => entry.carIdx === retiredCarIdx)).toBe(
+      false
+    );
+
+    const fullClassSof = computeClassSof(classRoster);
+    const visibleClassSof = computeClassSof(
+      classRoster.filter((entry) => entry.carIdx !== retiredCarIdx)
+    );
+
+    expect(visibleClassSof).not.toBe(fullClassSof);
+    expect(group?.classSof).toBe(fullClassSof);
   });
 
   it('stops reacting to the field once its instance unmounts', () => {
@@ -526,6 +536,43 @@ describe('StandingsWidgetStore — per instance', () => {
 
     expect(playerTable.projectedIrDeltaOf(driver.carIdx)).toBe(-8);
   });
+
+  it.each(['grouped', 'cycling'] as const)(
+    'orders %s rows and intervals by class rank',
+    (viewMode) => {
+      const frame = core.backendComputed.driverEntries!;
+      const identities = core.backendComputed.driverIdentities;
+      const classId = identities[0].carClassId;
+      const [first, second] = identities.filter(
+        (entry) => entry.carClassId === classId
+      );
+
+      runInAction(() => {
+        core.liveWidgets.updateUserSettings(STANDINGS, {
+          viewMode,
+          useLivePositions: false,
+          hideRetiredDrivers: false,
+        });
+        core.backendComputed.updateDriverEntries({
+          ...frame,
+          entries: frame.entries.flatMap((entry) => {
+            if (entry.carIdx === first.carIdx)
+              return [{ ...entry, position: 1, classPosition: 2 }];
+            if (entry.carIdx === second.carIdx)
+              return [{ ...entry, position: 2, classPosition: 1 }];
+            return [];
+          }),
+        });
+      });
+      const table = openTable(core, STANDINGS);
+
+      expect(
+        table.allClassGroups[0].drivers.map((entry) => entry.carIdx)
+      ).toEqual([second.carIdx, first.carIdx]);
+      expect(table.carAheadMap.get(first.carIdx)).toBe(second.carIdx);
+      expect(table.carAheadMap.has(second.carIdx)).toBe(false);
+    }
+  );
 
   describe('cars without a place', () => {
     const useOfficialOrder = () =>
