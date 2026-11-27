@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "PILOTES",
+    "laps": "TOURS"
+  },
   "catalog": {
     "input-trace": {
       "description": "Entrées en direct de l’accélérateur, du frein et de l’embrayage."

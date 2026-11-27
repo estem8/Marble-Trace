@@ -132,7 +132,25 @@ export const syncOverlayWindows = (root: RendererCore): Promise<void> => {
         if (!wanted.has(label)) {
           const existing = await WebviewWindow.getByLabel(label);
 
-          await existing?.close();
+          if (existing) {
+            // The close request returns while the renderer flushes its settings.
+            // Keep the next sync from reusing the window until it is destroyed.
+            let notifyDestroyed: () => void = () => {};
+            const destroyed = new Promise<void>((resolve) => {
+              notifyDestroyed = resolve;
+            });
+            const unlisten = await existing.listen(
+              'tauri://destroyed',
+              notifyDestroyed
+            );
+
+            try {
+              await existing.close();
+              await destroyed;
+            } finally {
+              unlisten();
+            }
+          }
         }
       }
 

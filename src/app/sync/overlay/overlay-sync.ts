@@ -71,9 +71,13 @@ export const initOverlaySync = async (root: OverlayRoot) => {
   const unlistens = await setupOverlayListeners(root);
 
   unlistens.push(
-    await windowHandle.onCloseRequested(() =>
-      root.settingsClient.flushSettingsBeforeClose()
-    )
+    await windowHandle.onCloseRequested(async () => {
+      try {
+        await root.settingsClient.flushSettingsBeforeClose();
+      } catch (error) {
+        console.error('Failed to flush overlay settings before close:', error);
+      }
+    })
   );
 
   unlistens.push(

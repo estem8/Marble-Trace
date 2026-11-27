@@ -42,9 +42,18 @@ interface ToolbarPopoverProps {
  */
 const detachedPlacementOf = (
   trigger: HTMLElement,
-  align: 'start' | 'end'
+  align: 'start' | 'end' | 'center'
 ): CSSProperties => {
   const bounds = trigger.getBoundingClientRect();
+
+  if (align === 'center') {
+    const center = bounds.left + bounds.width / 2;
+
+    return {
+      top: bounds.bottom + DETACHED_GAP_PX,
+      left: `clamp(${DETACHED_GAP_PX}px, calc(${center}px - var(--detached-panel-width) / 2), calc(100vw - var(--detached-panel-width) - ${DETACHED_GAP_PX}px))`,
+    };
+  }
 
   if (align === 'end') {
     return {
@@ -86,12 +95,7 @@ export const ToolbarPopover = observer(
       isOpen,
       toggle: () => {
         if (!isOpen && isDetached && rootRef.current) {
-          setPlacement(
-            detachedPlacementOf(
-              rootRef.current,
-              align === 'end' ? 'end' : 'start'
-            )
-          );
+          setPlacement(detachedPlacementOf(rootRef.current, align));
         }
 
         setIsOpen(!isOpen);
@@ -138,7 +142,8 @@ export const ToolbarPopover = observer(
         className={cx(
           styles.panel,
           align === 'end' && styles.panelEnd,
-          align === 'center' && styles.panelCentered,
+          align === 'center' &&
+            (isDetached ? styles.panelDetachedCentered : styles.panelCentered),
           isWide && styles.panelWide,
           isDetached && styles.panelDetached
         )}

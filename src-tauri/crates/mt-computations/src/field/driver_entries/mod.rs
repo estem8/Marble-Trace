@@ -263,6 +263,7 @@ struct RaceTiming {
     cars: HashMap<i32, CarRaceState>,
     previous_finish_samples: HashMap<i32, FinishSample>,
     previous_session_state: Option<SessionState>,
+    observed_grid: bool,
     session_key: Option<(Option<i32>, i32)>,
     last_session_time: Option<f64>,
     resuming: bool,
@@ -456,10 +457,9 @@ fn compute_frame(
 
     let live_positions =
         live_positions_published(car_idx, &deduped_drivers, player_car_idx, results);
-    let observed_grid = locked_state
-        .race_timing
-        .previous_session_state
-        .is_some_and(|phase| !race_has_started(Some(phase)));
+    locked_state.race_timing.observed_grid |=
+        is_race && session_state.is_some_and(|phase| !race_has_started(Some(phase)));
+    let observed_grid = locked_state.race_timing.observed_grid;
 
     let mut evidenced_laps_by_car = HashMap::new();
     let mut observed_wraps = HashSet::new();
@@ -590,8 +590,7 @@ fn compute_frame(
             let pre_flag_wrap = if matches!(
                 session_state,
                 Some(SessionState::Racing | SessionState::Checkered)
-            ) && tow_baseline
-                .map_or(live_laps_completed.is_none(), |_| was_racing)
+            ) && was_racing
                 && on_racing_surface
             {
                 locked_state
@@ -937,17 +936,17 @@ fn compute_frame(
                 assign_reconstructed_grid(&mut entries);
                 Some(StandingsOrder::Grid)
             }
+            RankingMode::Grid if !start_positions.is_empty() => {
+                apply_confirmed_grid(&mut entries, start_positions);
+                Some(StandingsOrder::OfficialGrid)
+            }
             RankingMode::Grid => {
                 assign_static_positions(&mut entries, grid_sort_key);
                 for entry in &mut entries {
                     entry.position = entry.live_position;
                     entry.class_position = entry.live_class_position;
                 }
-                if start_positions.is_empty() {
-                    Some(StandingsOrder::Grid)
-                } else {
-                    Some(StandingsOrder::OfficialGrid)
-                }
+                Some(StandingsOrder::Grid)
             }
             RankingMode::Official => {
                 assign_static_positions(&mut entries, official_sort_key);
@@ -1286,6 +1285,7 @@ fn finish_sample(
     entry: &DriverEntry,
     car_idx: &CarIdxFrame,
     session_time: Option<f64>,
+    verified_wrap: bool,
 ) -> Option<FinishSample> {
     let progress = entry
         .lap_dist_pct
@@ -1295,7 +1295,8 @@ fn finish_sample(
         .car_idx_laps_completed
         .get(entry.car_idx as usize)
         .copied()
-        .filter(|laps| *laps >= 0)?;
+        .filter(|laps| *laps >= 0)
+        .max(verified_wrap.then_some(entry.laps_completed))?;
 
     Some(FinishSample {
         time,
@@ -1539,6 +1540,7 @@ fn assign_caution_positions(
             && !awaits_pit_start_position(entry, state)
     };
     let mut positions = HashSet::with_capacity(entries.len());
+    let mut class_positions = HashSet::with_capacity(entries.len());
     let published = live_positions
         && entries
             .iter()
@@ -1548,11 +1550,17 @@ fn assign_caution_positions(
                     .car_idx_position
                     .get(entry.car_idx as usize)
                     .is_some_and(|&rank| rank > 0 && positions.insert(rank))
+                    && car_idx
+                        .car_idx_class_position
+                        .get(entry.car_idx as usize)
+                        .is_some_and(|&rank| {
+                            rank > 0 && class_positions.insert((entry.car_class_id, rank))
+                        })
             });
 
     if published {
         positions.clear();
-        let mut class_positions = HashSet::with_capacity(entries.len());
+        class_positions.clear();
         // An off-track row can still carry an old scoring slot.
         entries.sort_by_key(|entry| (!is_active(entry), entry.car_idx));
         for entry in entries.iter_mut() {

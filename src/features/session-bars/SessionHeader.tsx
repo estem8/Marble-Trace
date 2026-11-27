@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { observer } from 'mobx-react-lite';
 import { Gauge, Repeat, Users } from 'lucide-react';
 
@@ -54,6 +55,7 @@ export const SessionHeader = observer(
       showLapProgress,
       showSessionTime,
     } = settings;
+    const { t } = useTranslation('widgets');
     const useIcons = headerChipLabelMode === 'icon';
     const showSof = settings.showSOF && !hasClassHeaders;
     const { driverIdentities, leaderLap } = useBackendComputedStore();
@@ -132,7 +134,7 @@ export const SessionHeader = observer(
           {showTotalDrivers && (
             <StatChip
               presentation={chipStyle}
-              lead="DRIVERS"
+              lead={t('sessionHeader.drivers')}
               labelIcon={useIcons ? Users : undefined}
               look="reading"
               tone="info"
@@ -160,7 +162,7 @@ export const SessionHeader = observer(
           {lapProgress && (
             <StatChip
               presentation={lapProgress.isFinalLap ? 'semantic' : chipStyle}
-              lead="LAPS"
+              lead={t('sessionHeader.laps')}
               labelIcon={useIcons ? Repeat : undefined}
               look="reading"
               tone={lapProgress.isFinalLap ? 'accent' : 'positive'}

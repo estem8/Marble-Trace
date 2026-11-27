@@ -521,6 +521,15 @@ fn test_a_leader_crossing_during_racing_does_not_arm_the_finish_latch() {
 
 #[test]
 fn test_a_lapped_car_crossing_before_the_flag_in_the_same_tick_stays_unfinished() {
+    assert_lapped_car_crossing_before_flag(false);
+}
+
+#[test]
+fn lapped_car_counter_catchup_does_not_count_as_a_second_crossing() {
+    assert_lapped_car_crossing_before_flag(true);
+}
+
+fn assert_lapped_car_crossing_before_flag(counter_lags: bool) {
     let session = two_car_race_session();
     let state = Mutex::new(DriverEntriesState::default());
     let mut before = trailing_and_leading_frame(12, 13);
@@ -537,6 +546,9 @@ fn test_a_lapped_car_crossing_before_the_flag_in_the_same_tick_stays_unfinished(
 
     let mut at_flag = trailing_and_leading_frame(13, 14);
     at_flag.car_idx_lap_dist_pct = vec![0.01, 0.01];
+    if counter_lags {
+        at_flag.car_idx_laps_completed[0] = before.car_idx_laps_completed[0];
+    }
     let frame = compute_with_clock(
         &at_flag,
         &session,
@@ -562,6 +574,21 @@ fn test_a_lapped_car_crossing_before_the_flag_in_the_same_tick_stays_unfinished(
             .unwrap()
             .is_finished
     );
+
+    if counter_lags {
+        at_flag.car_idx_laps_completed[0] += 1;
+        at_flag.car_idx_lap_dist_pct[0] = 0.02;
+        let caught_up = compute_with_clock(
+            &at_flag,
+            &session,
+            &HashMap::new(),
+            false,
+            Some(SessionState::Checkered),
+            &state,
+            Some(10.15),
+        );
+        assert!(!player_entry(&caught_up).is_finished);
+    }
 
     let mut after_flag = trailing_and_leading_frame(14, 14);
     after_flag.car_idx_lap_dist_pct = vec![0.02, 0.15];
@@ -2480,6 +2507,14 @@ fn caution_uses_sim_positions_and_holds_them_when_they_disappear() {
     let caution = sample(&car, Some(CAUTION));
     assert_eq!(caution.standings_order, Some(StandingsOrder::Caution));
     assert_eq!(player_entry(&caution).live_position, 2);
+    car.car_idx_class_position.fill(1);
+    let duplicate_class_rank = sample(&car, Some(CAUTION));
+    assert_eq!(
+        duplicate_class_rank.standings_order,
+        Some(StandingsOrder::Hold)
+    );
+    assert_eq!(player_entry(&duplicate_class_rank).live_class_position, 2);
+
     car.car_idx_position.fill(0);
     let held = sample(&car, None);
     assert_eq!(held.standings_order, Some(StandingsOrder::Hold));
@@ -4348,6 +4383,10 @@ fn pit_starter_has_no_race_rank_until_the_sim_places_it() {
 
     let grid = sample(&telemetry, SessionState::ParadeLaps);
     assert_eq!(player_entry(&grid).live_position, 2);
+
+    telemetry.car_idx_track_surface[0] = TrackSurface::NotInWorld;
+    sample(&telemetry, SessionState::Racing);
+    telemetry.car_idx_track_surface[0] = TrackSurface::InPitStall;
 
     let green = sample(&telemetry, SessionState::Racing);
     let pit_starter = player_entry(&green);

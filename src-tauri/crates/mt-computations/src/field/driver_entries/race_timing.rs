@@ -74,7 +74,7 @@ fn apply_official_outcome(
     if let Some(finish) = car.finish.as_mut() {
         if finish.completed != laps_completed {
             if laps_completed < finish.completed {
-                if finish.best_lap_time == car.lap_history.time {
+                if car.lap_history.time.is_none() || finish.best_lap_time == car.lap_history.time {
                     finish.best_lap_time = None;
                 }
                 car.lap_history = Default::default();
@@ -311,11 +311,16 @@ impl RaceTiming {
                 .filter(|entry| {
                     under_checkered
                         || (entering_cooldown
-                            && finish_sample(entry, car_idx, session.time)
-                                .zip(self.previous_finish_samples.get(&entry.car_idx))
-                                .is_some_and(|(sample, previous)| {
-                                    sample.crossing_since(previous).is_some()
-                                }))
+                            && finish_sample(
+                                entry,
+                                car_idx,
+                                session.time,
+                                observed_wraps.contains(&entry.car_idx),
+                            )
+                            .zip(self.previous_finish_samples.get(&entry.car_idx))
+                            .is_some_and(|(sample, previous)| {
+                                sample.crossing_since(previous).is_some()
+                            }))
                 })
                 .filter(|entry| {
                     self.previous_laps
@@ -375,7 +380,12 @@ impl RaceTiming {
                 {
                     continue;
                 }
-                let Some(sample) = finish_sample(entry, car_idx, session.time) else {
+                let Some(sample) = finish_sample(
+                    entry,
+                    car_idx,
+                    session.time,
+                    observed_wraps.contains(&entry.car_idx),
+                ) else {
                     continue;
                 };
 

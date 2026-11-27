@@ -268,7 +268,7 @@ export const StatChip = observer(
                 aria-hidden={!iconLabel}
               />
             )}
-            {!labelIcon && lead !== undefined && (
+            {!iconLabel && lead !== undefined && (
               <span className={styles.leadText}>{lead}</span>
             )}
           </span>

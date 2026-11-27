@@ -337,6 +337,33 @@ describe('getStandingsGap', () => {
     });
   });
 
+  it.each([0, 1])(
+    'uses F2 when live progress contradicts a reference result lap of %s',
+    (referenceResultLap) => {
+      const driver = makeGapEntry({
+        lap: 10,
+        lapDistPct: 0.4,
+        resultsPositionLap: 0,
+        resultsPositionTime: 5,
+        f2Time: 12,
+      });
+      const reference = makeGapEntry({
+        lap: 10,
+        lapDistPct: 0.5,
+        resultsPositionLap: referenceResultLap,
+        resultsPositionTime: 10,
+        f2Time: 8,
+      });
+
+      expect(
+        getStandingsGap(driver, reference, {
+          isRace: true,
+          useLiveTiming: true,
+        })
+      ).toEqual({ kind: 'seconds', seconds: 4 });
+    }
+  );
+
   it.each([0, 10])('uses F2 when provisional results tie at %s', (time) => {
     const driver = makeGapEntry({
       resultsPositionLap: 0,

@@ -203,9 +203,11 @@ export class StandingsScrollStore {
    * Scrolling back unwinds the same path.
    */
   private scrollListsInTurn(delta: number) {
-    const topKey = Array.from(this.scrollMetrics.keys())[0];
+    const topKey = this.scrollMetrics.has(SINGLE_LIST_SCROLL_KEY)
+      ? SINGLE_LIST_SCROLL_KEY
+      : this.groupKeys[this.groupScrollIndex];
 
-    if (topKey === undefined) {
+    if (topKey === undefined || !this.scrollMetrics.has(topKey)) {
       return;
     }
 

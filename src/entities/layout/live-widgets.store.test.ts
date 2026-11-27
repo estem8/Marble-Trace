@@ -370,8 +370,9 @@ describe('derived design width', () => {
 
     // An overlay's popup narrowing the name column, as a command: only the
     // field it changed, the width is main's to recompute.
-    store.applyClientCommand(() =>
-      store.updateUserSettings('standings', { nameColumnWidth: 100 })
+    store.applyClientCommand(
+      () => store.updateUserSettings('standings', { nameColumnWidth: 100 }),
+      'layout-1'
     );
 
     const synced = store.getWidget('standings')!;

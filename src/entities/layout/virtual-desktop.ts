@@ -50,11 +50,15 @@ const clampAxis = (
     const firstLine = Math.ceil(min / gridSize) * gridSize;
     const lastLine = Math.floor(max / gridSize) * gridSize;
 
-    if (firstLine <= lastLine) {
-      return Math.min(
-        Math.max(Math.round(value / gridSize) * gridSize, firstLine),
-        lastLine
-      );
+    const snapped = Math.round(value / gridSize) * gridSize;
+
+    if (
+      Number.isFinite(firstLine) &&
+      Number.isFinite(lastLine) &&
+      Number.isFinite(snapped) &&
+      firstLine <= lastLine
+    ) {
+      return Math.min(Math.max(snapped, firstLine), lastLine);
     }
   }
 

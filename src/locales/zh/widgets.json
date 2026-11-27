@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "车手",
+    "laps": "圈数"
+  },
   "catalog": {
     "input-trace": {
       "description": "实时油门、刹车和离合器输入。"

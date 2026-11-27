@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "DRIVERS",
+    "laps": "LAPS"
+  },
   "catalog": {
     "input-trace": {
       "description": "Live throttle, brake, and clutch inputs."

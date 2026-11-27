@@ -217,6 +217,7 @@ export const registerClientPublishing = async (root: MainRoot) => {
 
     runInAction(() => {
       if (
+        !layoutId ||
         !monitorName ||
         (layoutId !== root.layouts.liveLayoutId && !finishesWidgetEdit)
       ) {

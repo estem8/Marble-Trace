@@ -96,7 +96,7 @@ const mainWithTwoMonitors = () => {
   liveWidgets.applyClientCommand(() => {
     liveWidgets.setTypeEnabledOnMonitor('fuel', 'LEFT', true);
     liveWidgets.setTypeEnabledOnMonitor('standings', 'RIGHT', true);
-  });
+  }, 'layout-race');
 
   return root;
 };
@@ -351,6 +351,11 @@ describe('main answering its clients', () => {
         .byId('layout-race')
         ?.widgets.find((widget) => widget.id === 'fuel')?.userSettings.opacity
     ).toBe(0.5);
+    expect(
+      main.layouts
+        .byId('layout-qualify')
+        ?.widgets.find((widget) => widget.id === 'fuel')?.userSettings.opacity
+    ).not.toBe(0.5);
 
     publishing.dispose();
   });
@@ -406,6 +411,12 @@ describe('main answering its clients', () => {
         .byId('layout-race')
         ?.widgets.find((widget) => widget.id === 'fuel')?.userSettings.opacity
     ).toBe(0.5);
+    expect(
+      main.layouts
+        .byId('layout-qualify')
+        ?.widgets.find((widget) => widget.id === 'fuel')?.userSettings.opacity
+    ).not.toBe(0.5);
+    expect(main.layouts.liveLayoutId).toBe('layout-qualify');
 
     publishing.dispose();
   });

@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "ПИЛОТЫ",
+    "laps": "КРУГИ"
+  },
   "catalog": {
     "input-trace": {
       "description": "Живые значения газа, тормоза и сцепления."

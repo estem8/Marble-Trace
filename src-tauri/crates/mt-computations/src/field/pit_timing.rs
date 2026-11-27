@@ -143,6 +143,9 @@ impl PitTimingTracker {
                     stop.stall_since = Some(now);
                     stop.stall_pct = entry.lap_dist_pct;
                 }
+                (true, Some(_)) if stop.stall_pct.is_none() => {
+                    stop.stall_pct = entry.lap_dist_pct;
+                }
                 (false, Some(since)) => {
                     stop.stall_s += now - since;
                     stop.stall_since = None;

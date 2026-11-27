@@ -66,6 +66,20 @@
   font-family: $font-app;
 }
 
+.panelDetachedCentered {
+  --detached-panel-width: min(#{rem(220)}, calc(100vw - 12px));
+
+  box-sizing: border-box;
+  width: var(--detached-panel-width);
+  min-width: 0;
+
+  &.panelWide {
+    --detached-panel-width: min(#{rem(300)}, calc(100vw - 12px));
+
+    width: var(--detached-panel-width);
+  }
+}
+
 .panelWide {
   width: rem(300);
   height: rem(360);

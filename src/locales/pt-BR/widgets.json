@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "PILOTOS",
+    "laps": "VOLTAS"
+  },
   "catalog": {
     "input-trace": {
       "description": "Entradas ao vivo de acelerador, freio e embreagem."

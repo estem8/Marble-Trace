@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "PILOTOS",
+    "laps": "VUELTAS"
+  },
   "catalog": {
     "input-trace": {
       "description": "Acelerador, freno y embrague en directo."

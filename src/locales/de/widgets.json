@@ -1,4 +1,8 @@
 {
+  "sessionHeader": {
+    "drivers": "FAHRER",
+    "laps": "RUNDEN"
+  },
   "catalog": {
     "input-trace": {
       "description": "Live Gas-, Brems- und Kupplungseingaben."

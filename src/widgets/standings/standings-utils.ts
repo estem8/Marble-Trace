@@ -696,7 +696,7 @@ export const getStandingsGap = (
   ) {
     const lapsDown = resLap - referenceLap;
 
-    if (useLiveTiming && lapsDown < 0) {
+    if (useLiveTiming && progressBehind === null && lapsDown < 0) {
       return EMPTY_GAP;
     }
 
@@ -711,7 +711,7 @@ export const getStandingsGap = (
         return { kind: 'seconds', seconds: timeDiff };
       }
 
-      if (useLiveTiming && timeDiff < 0) {
+      if (useLiveTiming && progressBehind === null && timeDiff < 0) {
         return EMPTY_GAP;
       }
     }

@@ -322,10 +322,7 @@ export class LiveWidgetsStore implements WidgetMap {
    * fuel values the backend keeps — against the layout the client drew when
    * it made the edit, without an undo step.
    */
-  applyClientCommand<Result>(
-    command: () => Result,
-    layoutId = this.layoutRecords.liveLayoutId
-  ): Result {
+  applyClientCommand<Result>(command: () => Result, layoutId: string): Result {
     const previousLayoutId = this.clientCommandLayoutId;
     this.clientCommandLayoutId = layoutId;
 
