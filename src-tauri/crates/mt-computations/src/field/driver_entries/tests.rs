@@ -968,7 +968,7 @@ fn test_the_official_results_stand_in_for_a_zeroed_lap_counter() {
 }
 
 #[test]
-fn test_post_flag_result_waits_for_live_count_to_clear_before_finishing() {
+fn a_result_seen_at_the_flag_cannot_finish_a_follower_when_the_counter_catches_up() {
     let mut session = two_car_race_session();
     session.sessions[0].results_positions.push(ResultPosition {
         car_idx: 0,
@@ -1035,8 +1035,28 @@ fn test_post_flag_result_waits_for_live_count_to_clear_before_finishing() {
         .iter()
         .find(|entry| entry.car_idx == 0)
         .unwrap();
-    assert!(trailing_car.is_finished);
-    assert!(trailing_car.finish_timing.is_some());
+    assert!(!trailing_car.is_finished);
+    assert!(trailing_car.finish_timing.is_none());
+
+    let caught_up = compute(
+        &trailing_and_leading_frame(13, 14),
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+    assert!(!player_entry(&caught_up).is_finished);
+
+    let next_crossing = compute(
+        &trailing_and_leading_frame(14, 14),
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+    assert!(player_entry(&next_crossing).is_finished);
 }
 
 #[test]
@@ -2301,11 +2321,13 @@ fn official_lap_correction_reconciles_the_frozen_finish() {
     };
     let mut car = racing_car_idx_frame_on_lap(0, 20);
     car.car_idx_last_lap_time = vec![91.0];
+    car.car_idx_best_lap_time = vec![91.0];
     car.car_idx_lap_dist_pct = vec![0.98];
     sample(&car, &session, 100.0);
     car.car_idx_lap[0] = 21;
     car.car_idx_laps_completed[0] = 20;
     car.car_idx_last_lap_time[0] = 90.0;
+    car.car_idx_best_lap_time[0] = 90.0;
     car.car_idx_lap_dist_pct[0] = 0.02;
     let live = sample(&car, &session, 100.1);
     assert!(player_entry(&live)
@@ -2316,23 +2338,35 @@ fn official_lap_correction_reconciles_the_frozen_finish() {
 
     session.sessions[0].results_official = Some(true);
     session.sessions[0].results_positions = vec![ResultPosition {
-        laps_complete: Some(21),
-        last_time: Some(92.0),
-        fastest_time: Some(90.0),
+        laps_complete: Some(20),
+        last_time: Some(90.5),
+        fastest_time: Some(90.5),
         ..result_at(0, 1)
     }];
-    let corrected = sample(&car, &session, 100.2);
+    let same_lap = sample(&car, &session, 100.2);
+    let player = player_entry(&same_lap);
+    assert_eq!(player.last_lap_time, Some(90.5));
+    assert_eq!(player.best_lap_time, Some(90.5));
+    assert_eq!(player.last_lap_delta, Some(-0.5));
+    assert!(player.finish_timing.unwrap().crossing_time.is_some());
+
+    let result = &mut session.sessions[0].results_positions[0];
+    result.laps_complete = Some(21);
+    result.last_time = Some(92.0);
+    result.fastest_time = None;
+    let corrected = sample(&car, &session, 100.3);
     let player = player_entry(&corrected);
     assert_eq!((player.laps_completed, player.lap), (21, 22));
     assert_eq!(player.finish_timing.unwrap().crossing_time, None);
     assert_eq!(player.last_lap_time, Some(92.0));
-    assert_eq!(player.last_lap_delta, Some(2.0));
+    assert_eq!(player.last_lap_delta, Some(1.5));
+    assert_eq!(player.best_lap_time, Some(90.5));
 
     let result = &mut session.sessions[0].results_positions[0];
     result.laps_complete = Some(19);
     result.last_time = Some(91.0);
     result.fastest_time = Some(91.0);
-    let corrected = sample(&car, &session, 100.3);
+    let corrected = sample(&car, &session, 100.4);
     let player = player_entry(&corrected);
     assert_eq!((player.laps_completed, player.lap), (19, 20));
     assert_eq!(player.last_lap_time, Some(91.0));
@@ -3698,14 +3732,17 @@ fn caution_keeps_unranked_rows_behind_published_ranks() {
         &HashMap::new(),
     );
     assert_eq!(mode, StandingsOrder::Caution);
-    assert_eq!(
-        (entries[0].live_position, entries[0].live_class_position),
-        (2, 2)
-    );
-    assert_eq!(
-        (entries[1].live_position, entries[1].live_class_position),
-        (0, 0)
-    );
+    let ranks: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.car_idx,
+                entry.live_position,
+                entry.live_class_position,
+            )
+        })
+        .collect();
+    assert_eq!(ranks, vec![(1, 2, 2), (0, 0, 0)]);
 }
 
 #[test]

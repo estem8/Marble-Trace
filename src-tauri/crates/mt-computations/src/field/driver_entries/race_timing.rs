@@ -67,6 +67,10 @@ fn apply_official_outcome(
         official_gap: result.time.filter(|time| time.is_finite() && *time >= 0.0),
     };
 
+    if car.finish.is_none() && result.reason_out_id == Some(0) && result.position > 0 {
+        record_finish(car, entry, timing, tick);
+    }
+
     if let Some(finish) = car.finish.as_mut() {
         if finish.completed != laps_completed {
             if laps_completed < finish.completed {
@@ -77,11 +81,17 @@ fn apply_official_outcome(
             }
             car.lap_history.observe(laps_completed, None, false, false);
             finish.completed = laps_completed;
+        }
+        if laps_completed > 0 {
             finish.best_lap_time = valid_lap_time(result.fastest_time).or(finish.best_lap_time);
+            if let Some(time) = valid_lap_time(result.last_time) {
+                car.lap_history
+                    .observe(laps_completed, Some(time), true, false);
+            }
+        } else {
+            finish.best_lap_time = None;
         }
         car.finish_timing = Some(timing);
-    } else if result.reason_out_id == Some(0) && result.position > 0 {
-        record_finish(car, entry, timing, tick);
     }
 }
 
@@ -190,9 +200,6 @@ impl RaceTiming {
         evidenced_laps_by_car: HashMap<i32, i32>,
         session: Option<FinishSession>,
     ) {
-        let finish_latch_was_armed = self.laps_at_checkered.is_some();
-        let mut finish_flag_armed_this_tick = false;
-
         // Finish latch. A car has finished once it crosses the line after the flag came
         // out, which the lap counter records against a baseline snapshotted from the tick
         // before. The official results can classify a car whose crossing was missed.
@@ -350,8 +357,6 @@ impl RaceTiming {
             let flag_crossing = self.observed_before_checkered
                 && leader_crossing_observed
                 && self.laps_at_checkered.is_none();
-            finish_flag_armed_this_tick = flag_crossing;
-
             if flag_crossing {
                 // The leader needs no special case: on the tick it crosses, the previous
                 // tick still holds the lap it was on, so the same comparison that latches
@@ -520,6 +525,22 @@ impl RaceTiming {
                         state.tow_finish_baselines.remove(&entry.car_idx);
                     }
                 }
+
+                if flag_crossing
+                    && !finisher_crossed
+                    && !entry.is_retired
+                    && !entry.is_towed
+                    && is_racing(entry)
+                {
+                    // A result already visible at the flag can belong to a
+                    // crossing before it. A later counter catch-up cannot date it.
+                    if let Some((baselines, result_laps)) =
+                        state.laps_at_checkered.as_mut().zip(result_completed)
+                    {
+                        let baseline = baselines.entry(entry.car_idx).or_insert(completed);
+                        *baseline = (*baseline).max(result_laps);
+                    }
+                }
             }
 
             state.previous_finish_samples = finish_samples;
@@ -527,24 +548,7 @@ impl RaceTiming {
 
         for (&result_car_idx, result) in results_positions_map {
             if let Some(laps) = result.laps_complete.filter(|laps| *laps >= 0) {
-                let result_is_ahead_of_live = car_idx
-                    .car_idx_laps_completed
-                    .get(result_car_idx as usize)
-                    .is_some_and(|&live| live >= 0 && laps > live);
-                let defer_until_resolved = (finish_latch_was_armed || finish_flag_armed_this_tick)
-                    && result_is_ahead_of_live
-                    && entries.iter().any(|entry| {
-                        entry.car_idx == result_car_idx
-                            && !entry.is_retired
-                            && matches!(
-                                entry.track_surface,
-                                TrackSurface::OnTrack | TrackSurface::OffTrack
-                            )
-                    });
-
-                if !defer_until_resolved {
-                    self.previous_result_laps.insert(result_car_idx, laps);
-                }
+                self.previous_result_laps.insert(result_car_idx, laps);
             }
         }
 
