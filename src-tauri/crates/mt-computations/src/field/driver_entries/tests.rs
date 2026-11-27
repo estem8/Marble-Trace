@@ -556,6 +556,42 @@ fn a_car_catching_the_leader_on_pit_road_does_not_arm_the_flag() {
 }
 
 #[test]
+fn a_live_pit_road_crossing_by_the_leader_arms_the_flag() {
+    let session = two_car_race_session();
+    let state = Mutex::new(DriverEntriesState::default());
+    let sample = |live: &CarIdxFrame, time| {
+        compute_with_clock(
+            live,
+            &session,
+            &HashMap::new(),
+            false,
+            Some(SessionState::Checkered),
+            &state,
+            Some(time),
+        )
+    };
+    let mut live = trailing_and_leading_frame(20, 21);
+    live.car_idx_on_pit_road[1] = true;
+    live.car_idx_track_surface[1] = TrackSurface::AproachingPits;
+    live.car_idx_lap_dist_pct = vec![0.995, 0.99];
+    sample(&live, 10.0);
+
+    live.car_idx_lap = vec![21, 22];
+    live.car_idx_laps_completed = vec![20, 21];
+    live.car_idx_lap_dist_pct = vec![0.01, 0.01];
+    let frame = sample(&live, 10.1);
+    assert!(!player_entry(&frame).is_finished);
+    assert!(frame
+        .entries
+        .iter()
+        .any(|entry| entry.car_idx == 1 && entry.is_finished));
+
+    live.car_idx_lap[0] = 22;
+    live.car_idx_laps_completed[0] = 21;
+    assert!(player_entry(&sample(&live, 10.2)).is_finished);
+}
+
+#[test]
 fn a_timed_leader_crossing_bounds_the_flag_when_another_sample_is_missing() {
     let mut session = two_car_race_session();
     session.cars.push(CarEntry {
@@ -1721,6 +1757,12 @@ fn test_departure_after_pit_road_keeps_a_new_live_completed_lap() {
 
 #[test]
 fn test_towed_car_stays_unfinished_on_results_only_pit_reentry() {
+    for completed_at_crossing in [-1, 11, 12] {
+        check_finish_after_pit_reentry(completed_at_crossing);
+    }
+}
+
+fn check_finish_after_pit_reentry(completed_at_crossing: i32) {
     let mut session = two_car_race_session();
     session.sessions[0].results_positions.push(ResultPosition {
         car_idx: 0,
@@ -1778,9 +1820,22 @@ fn test_towed_car_stays_unfinished_on_results_only_pit_reentry() {
     assert!(!player_entry(&reentered).is_finished);
 
     car_idx.car_idx_track_surface[0] = TrackSurface::OnTrack;
+    car_idx.car_idx_lap_dist_pct[0] = 0.95;
+    car_idx.car_idx_lap[0] = 12;
+    car_idx.car_idx_laps_completed[0] = 11;
+    let before_line = compute(
+        &car_idx,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+    assert!(!player_entry(&before_line).is_finished);
+
     car_idx.car_idx_lap_dist_pct[0] = 0.1;
     car_idx.car_idx_lap[0] = 13;
-    car_idx.car_idx_laps_completed[0] = 12;
+    car_idx.car_idx_laps_completed[0] = completed_at_crossing;
     let crossed = compute(
         &car_idx,
         &session,
@@ -1789,7 +1844,54 @@ fn test_towed_car_stays_unfinished_on_results_only_pit_reentry() {
         Some(SessionState::Checkered),
         &state,
     );
-    assert!(player_entry(&crossed).is_finished);
+    assert!(
+        player_entry(&crossed).is_finished,
+        "counter: {completed_at_crossing}"
+    );
+    assert_eq!(player_entry(&crossed).laps_completed, 12);
+
+    car_idx.car_idx_lap_dist_pct[0] = 0.2;
+    let after_line = compute(
+        &car_idx,
+        &session,
+        &HashMap::new(),
+        false,
+        Some(SessionState::Checkered),
+        &state,
+    );
+    assert_eq!(player_entry(&after_line).laps_completed, 12);
+}
+
+#[test]
+fn advancing_results_must_exceed_the_followers_finish_baseline() {
+    let mut session = two_car_race_session();
+    session.sessions[0].results_positions.push(ResultPosition {
+        car_idx: 0,
+        laps_complete: Some(10),
+        ..Default::default()
+    });
+    let state = Mutex::new(DriverEntriesState::default());
+    let sample = |live: &CarIdxFrame, session: &SessionSnapshot| {
+        compute(
+            live,
+            session,
+            &HashMap::new(),
+            false,
+            Some(SessionState::Checkered),
+            &state,
+        )
+    };
+    sample(&trailing_and_leading_frame(12, 13), &session);
+    let mut live = trailing_and_leading_frame(12, 14);
+    sample(&live, &session);
+
+    live.car_idx_lap[0] = 13;
+    live.car_idx_laps_completed[0] = -1;
+    session.sessions[0].results_positions[0].laps_complete = Some(11);
+    assert!(!player_entry(&sample(&live, &session)).is_finished);
+
+    session.sessions[0].results_positions[0].laps_complete = Some(12);
+    assert!(player_entry(&sample(&live, &session)).is_finished);
 }
 
 #[test]
@@ -2351,6 +2453,7 @@ fn delayed_result_replaces_stale_live_lap_time() {
     compute(&car, &session, &HashMap::new(), false, None, &state);
     car.car_idx_laps_completed[0] = 3;
     let waiting = compute(&car, &session, &HashMap::new(), false, None, &state);
+    assert_eq!(player_entry(&waiting).last_lap_time, None);
     assert_eq!(player_entry(&waiting).last_lap_delta, None);
     session.sessions[0].results_positions[0].laps_complete = Some(3);
     session.sessions[0].results_positions[0].last_time = Some(91.0);

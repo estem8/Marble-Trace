@@ -207,6 +207,7 @@ export class StandingsOrderStore {
     const ready = new Map<number, PendingPosition>();
     const claims = new Map<string, number>();
     const immediate = new Set<number>();
+    const deferredClassClears = new Set<number>();
 
     for (const [carIdx, pending] of this.pending) {
       const { rank, classId } = pending;
@@ -218,6 +219,11 @@ export class StandingsOrderStore {
 
       if (now - pending.since >= ORDER_SETTLE_MS) {
         ready.set(carIdx, pending);
+      } else if (
+        isPlaced(previousRank?.inClass ?? 0) &&
+        !isPlaced(rank.inClass)
+      ) {
+        deferredClassClears.add(carIdx);
       }
 
       if (
@@ -237,11 +243,12 @@ export class StandingsOrderStore {
       if (
         settled &&
         this.classIds.get(carIdx) === classId &&
+        !deferredClassClears.has(carIdx) &&
         (settled.overall === 0 ||
-          settled.inClass === 0 ||
-          rank.inClass === 0) &&
+          !isPlaced(settled.inClass) ||
+          !isPlaced(rank.inClass)) &&
         settled.inClass !== rank.inClass &&
-        (rank.inClass === 0 || claims.get(classKey) === 1)
+        (!isPlaced(rank.inClass) || claims.get(classKey) === 1)
       ) {
         uniqueClassMoves.add(carIdx);
       }
@@ -326,7 +333,11 @@ export class StandingsOrderStore {
     }
 
     for (const carIdx of immediate) {
-      for (const [index, move] of this.immediateMoves(carIdx, claims) ?? []) {
+      for (const [index, move] of this.immediateMoves(
+        carIdx,
+        claims,
+        deferredClassClears
+      ) ?? []) {
         ready.set(index, move);
       }
     }
@@ -376,14 +387,18 @@ export class StandingsOrderStore {
   }
 
   // A first placement brings along its dependencies only if they can all move.
-  private immediateMoves(carIdx: number, claims: ReadonlyMap<string, number>) {
+  private immediateMoves(
+    carIdx: number,
+    claims: ReadonlyMap<string, number>,
+    deferredClassClears: ReadonlySet<number>
+  ) {
     const required = new Set([carIdx]);
     const moves = new Map<number, PendingPosition>();
 
     for (const index of required) {
       const pending = this.pending.get(index);
 
-      if (!pending) {
+      if (!pending || deferredClassClears.has(index)) {
         return null;
       }
 

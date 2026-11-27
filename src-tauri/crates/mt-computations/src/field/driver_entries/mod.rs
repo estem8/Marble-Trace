@@ -453,49 +453,55 @@ pub(super) fn compute_with_clock(
                 .get(idx)
                 .copied()
                 .filter(|&laps| laps >= 0);
-            let retained_laps =
-                locked_state
-                    .race_timing
-                    .cars
-                    .get(&driver.car_idx)
-                    .and_then(|car| {
-                        if track_surface == TrackSurface::NotInWorld {
-                            car.display_laps
-                        } else {
-                            car.last_in_world_laps
-                        }
-                    });
+            let previous_car = locked_state.race_timing.cars.get(&driver.car_idx);
+            let retained_laps = previous_car.and_then(|car| {
+                if track_surface == TrackSurface::NotInWorld {
+                    car.display_laps
+                } else {
+                    car.last_in_world_laps
+                }
+            });
             let on_pit_road = car_idx
                 .car_idx_on_pit_road
                 .get(idx)
                 .copied()
                 .unwrap_or(false);
-            let live_laps_from_lap = (matches!(
+            let on_racing_surface = matches!(
                 track_surface,
                 TrackSurface::OnTrack | TrackSurface::OffTrack
-            ) && !on_pit_road
-                && live_laps_completed.is_none())
-            .then(|| {
-                live_lap.map(|lap| {
-                    let inferred_laps = lap.saturating_sub(1);
-                    result_laps
-                        .into_iter()
-                        .chain(retained_laps)
-                        .fold(inferred_laps, i32::max)
+            ) && !on_pit_road;
+            let live_laps_from_lap = (on_racing_surface && live_laps_completed.is_none())
+                .then(|| {
+                    live_lap.map(|lap| {
+                        let inferred_laps = lap.saturating_sub(1);
+                        result_laps
+                            .into_iter()
+                            .chain(retained_laps)
+                            .fold(inferred_laps, i32::max)
+                    })
                 })
-            })
-            .flatten();
-            let resolved_live_laps = live_laps_completed.or(live_laps_from_lap);
+                .flatten();
             let in_world = track_surface != TrackSurface::NotInWorld;
+            let tow_baseline = locked_state
+                .race_timing
+                .tow_finish_baselines
+                .get(&driver.car_idx)
+                .copied();
+            let was_racing = locked_state
+                .race_timing
+                .previous_location
+                .get(&driver.car_idx)
+                .is_some_and(|&(surface, on_pit_road)| {
+                    !on_pit_road
+                        && matches!(surface, TrackSurface::OnTrack | TrackSurface::OffTrack)
+                });
             let pre_flag_wrap = if matches!(
                 session_state,
                 Some(SessionState::Racing | SessionState::Checkered)
-            ) && live_laps_completed.is_none()
-                && !on_pit_road
-                && matches!(
-                    track_surface,
-                    TrackSurface::OnTrack | TrackSurface::OffTrack
-                ) {
+            ) && tow_baseline
+                .map_or(live_laps_completed.is_none(), |_| was_racing)
+                && on_racing_surface
+            {
                 locked_state
                     .race_timing
                     .previous_progress
@@ -508,27 +514,41 @@ pub(super) fn compute_with_clock(
                             && f64::from(lap) == previous.floor() + 1.0)
                             .then_some(lap - 1)
                     })
+                    .filter(|&laps| {
+                        tow_baseline.is_none_or(|baseline| laps > baseline)
+                            && live_laps_completed.is_none_or(|live| laps > live)
+                    })
             } else {
                 None
             };
+            let inferred_completed = previous_car
+                .and_then(|car| car.inferred_lap_timing.as_ref())
+                .filter(|timing| on_racing_surface && live_lap == Some(timing.completed + 1))
+                .map(|timing| timing.completed);
+            let verified_laps = pre_flag_wrap.max(inferred_completed);
+            let resolved_live_laps = live_laps_completed
+                .or(live_laps_from_lap)
+                .max(verified_laps);
             if pre_flag_wrap.is_some() {
                 observed_wraps.insert(driver.car_idx);
             }
             let (observed_laps, evidenced_laps) = if in_world {
                 (
                     resolved_live_laps.or_else(|| result_laps.max(retained_laps)),
-                    live_laps_completed.or_else(|| {
-                        result_laps
-                            .max(
-                                locked_state
-                                    .race_timing
-                                    .previous_laps
-                                    .get(&driver.car_idx)
-                                    .copied(),
-                            )
-                            .max(pre_flag_wrap)
-                            .or(live_laps_from_lap)
-                    }),
+                    live_laps_completed
+                        .or_else(|| {
+                            result_laps
+                                .max(
+                                    locked_state
+                                        .race_timing
+                                        .previous_laps
+                                        .get(&driver.car_idx)
+                                        .copied(),
+                                )
+                                .max(pre_flag_wrap)
+                                .or(live_laps_from_lap)
+                        })
+                        .max(verified_laps),
                 )
             } else if !is_retired
                 && departed_world(driver.car_idx, track_surface, &locked_state.race_timing)
@@ -596,7 +616,9 @@ pub(super) fn compute_with_clock(
                 car.last_live_lap_time = live_lap_time;
             }
             let inferred_lap_timing = car.inferred_lap_timing.as_ref().filter(|timing| {
-                live_laps_from_lap == Some(timing.completed)
+                on_racing_surface
+                    && laps_completed == Some(timing.completed)
+                    && live_laps_completed != laps_completed
                     && live_lap == Some(timing.completed + 1)
             });
             let live_lap_time_matches_count = (live_laps_completed.is_some()
@@ -615,12 +637,10 @@ pub(super) fn compute_with_clock(
                         || (laps == car.lap_history.number
                             && live_lap_time == car.lap_history.previous_time)
                 });
-            let last_lap_time = if live_lap_time_matches_count {
-                if stale_live_time && current_result_time.is_some() {
-                    current_result_time
-                } else {
-                    live_lap_time.or(result_lap_time)
-                }
+            let last_lap_time = if stale_live_time {
+                current_result_time
+            } else if live_lap_time_matches_count {
+                live_lap_time.or(result_lap_time)
             } else {
                 result_lap_time
             };
@@ -725,7 +745,12 @@ pub(super) fn compute_with_clock(
 
     entries.sort_by_key(official_sort_key);
     update_tow_states(&mut entries, &mut locked_state.race_timing);
-    release_tow_finish_baselines(&entries, car_idx, &mut locked_state.race_timing);
+    release_tow_finish_baselines(
+        &entries,
+        car_idx,
+        &observed_wraps,
+        &mut locked_state.race_timing,
+    );
 
     locked_state.race_timing.observe_finish(
         &mut entries,
@@ -1030,6 +1055,7 @@ fn retain_tow_finish_baselines(state: &mut RaceTiming, car_idx: &CarIdxFrame) {
 fn release_tow_finish_baselines(
     entries: &[DriverEntry],
     car_idx: &CarIdxFrame,
+    observed_wraps: &HashSet<i32>,
     state: &mut RaceTiming,
 ) {
     for entry in entries {
@@ -1042,10 +1068,12 @@ fn release_tow_finish_baselines(
             .copied()
             .filter(|laps| *laps >= 0);
 
-        if (entry.track_surface != TrackSurface::NotInWorld
+        let live_advance = (entry.track_surface != TrackSurface::NotInWorld
             || departed_world(entry.car_idx, entry.track_surface, state))
-            && live_laps.is_some_and(|laps| laps > baseline)
-        {
+            && live_laps.is_some_and(|laps| laps > baseline);
+        let returned_and_wrapped = !entry.is_towed && observed_wraps.contains(&entry.car_idx);
+
+        if live_advance || returned_and_wrapped {
             state.tow_finish_baselines.remove(&entry.car_idx);
         }
     }

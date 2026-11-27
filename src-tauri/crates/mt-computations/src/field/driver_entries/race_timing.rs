@@ -97,9 +97,26 @@ impl RaceTiming {
                 .filter_map(|entry| self.previous_laps.get(&entry.car_idx).copied())
                 .max()
                 .unwrap_or(leader_laps);
+            let live_advance_past_leader = |entry: &DriverEntry| {
+                car_idx
+                    .car_idx_laps_completed
+                    .get(entry.car_idx as usize)
+                    .is_some_and(|&laps| laps > leader_before)
+            };
+            let eligible_leader_crossing = |entry: &DriverEntry| {
+                eligible_to_cross(entry)
+                    || (can_set_leading_lap(entry)
+                        && matches!(
+                            entry.track_surface,
+                            TrackSurface::OnTrack
+                                | TrackSurface::OffTrack
+                                | TrackSurface::AproachingPits
+                        )
+                        && live_advance_past_leader(entry))
+            };
             let leader_crossing_laps: Vec<i32> = entries
                 .iter()
-                .filter(|entry| eligible_to_cross(entry))
+                .filter(|entry| eligible_leader_crossing(entry))
                 .filter(|entry| {
                     self.previous_laps
                         .get(&entry.car_idx)
@@ -107,10 +124,7 @@ impl RaceTiming {
                 })
                 .filter_map(|entry| {
                     let completed = completed_laps_for_finish(entry, self);
-                    let live_advance = car_idx
-                        .car_idx_laps_completed
-                        .get(entry.car_idx as usize)
-                        .is_some_and(|&laps| laps > leader_before);
+                    let live_advance = live_advance_past_leader(entry);
                     let results_advance = matches!(
                         entry.track_surface,
                         TrackSurface::OnTrack | TrackSurface::OffTrack
@@ -181,7 +195,7 @@ impl RaceTiming {
             if flag_crossing {
                 let flag_crossers = entries
                     .iter()
-                    .filter(|entry| eligible_to_cross(entry))
+                    .filter(|entry| eligible_leader_crossing(entry))
                     .filter(|entry| completed_laps_for_finish(entry, self) == flag_laps)
                     .filter(|entry| {
                         self.previous_laps
@@ -240,7 +254,10 @@ impl RaceTiming {
                         entry.track_surface,
                         TrackSurface::OnTrack | TrackSurface::OffTrack
                     )
-                    && results_advanced;
+                    && results_advanced
+                    && baseline_before_crossing
+                        .zip(result_completed)
+                        .is_some_and(|(baseline, laps)| laps > baseline);
                 let crossing_evidence = crossed_on_live_telemetry
                     || crossed_on_results_while_in_world
                     || (crossed_the_line && observed_wraps.contains(&entry.car_idx));
