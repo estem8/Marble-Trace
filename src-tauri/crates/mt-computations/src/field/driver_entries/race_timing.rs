@@ -27,6 +27,7 @@ fn record_finish(car: &mut CarRaceState, entry: &DriverEntry, timing: FinishTimi
     car.finish = Some(FrozenFinish {
         completed,
         best_lap_time: entry.best_lap_time,
+        live_time_at_crossing: car.last_live_lap_time,
         tick,
     });
 }
@@ -50,7 +51,10 @@ fn apply_official_outcome(
         return;
     }
 
-    let Some(laps_completed) = result.laps_complete.filter(|laps| *laps > 0) else {
+    let Some(laps_completed) = result
+        .laps_complete
+        .filter(|&laps| laps > 0 || (laps == 0 && car.finished))
+    else {
         return;
     };
     let crossing_time = car
@@ -63,7 +67,18 @@ fn apply_official_outcome(
         official_gap: result.time.filter(|time| time.is_finite() && *time >= 0.0),
     };
 
-    if car.finished {
+    if let Some(finish) = car.finish.as_mut() {
+        if finish.completed != laps_completed {
+            if laps_completed < finish.completed {
+                if finish.best_lap_time == car.lap_history.time {
+                    finish.best_lap_time = None;
+                }
+                car.lap_history = Default::default();
+            }
+            car.lap_history.observe(laps_completed, None, false, false);
+            finish.completed = laps_completed;
+            finish.best_lap_time = valid_lap_time(result.fastest_time).or(finish.best_lap_time);
+        }
         car.finish_timing = Some(timing);
     } else if result.reason_out_id == Some(0) && result.position > 0 {
         record_finish(car, entry, timing, tick);
@@ -74,32 +89,53 @@ fn apply_finish_snapshot(
     car: &mut CarRaceState,
     entry: &mut DriverEntry,
     result: Option<&ResultPosition>,
+    live: Option<&CarIdxFrame>,
 ) {
     entry.is_towed = false;
     let Some(finish) = car.finish.as_mut() else {
         return;
     };
-    if car.lap_history.time.is_none() {
-        let result_time = result
-            .filter(|result| result.laps_complete == Some(finish.completed))
-            .and_then(|result| result.last_time)
-            .filter(|time| time.is_finite() && *time > 0.0);
+    if finish.completed > 0 && car.lap_history.time.is_none() {
+        let result_time = valid_lap_time(
+            result
+                .filter(|result| result.laps_complete == Some(finish.completed))
+                .and_then(|result| result.last_time),
+        );
+        let late_live_time = live.and_then(|frame| {
+            let index = entry.car_idx as usize;
+            if entry.track_surface == TrackSurface::NotInWorld
+                || frame.car_idx_laps_completed.get(index) != Some(&finish.completed)
+                || frame
+                    .car_idx_lap
+                    .get(index)
+                    .is_some_and(|&lap| lap > 0 && lap != finish.completed.saturating_add(1))
+            {
+                return None;
+            }
+            valid_lap_time(frame.car_idx_last_lap_time.get(index).copied()).filter(|&time| {
+                Some(time) != finish.live_time_at_crossing
+                    && Some(time) != car.lap_history.previous_time
+            })
+        });
+        let time = result_time.or(late_live_time);
         car.lap_history
-            .observe(finish.completed, result_time, true, false);
-        if let Some(time) = result_time {
+            .observe(finish.completed, time, result_time.is_some(), false);
+        if let Some(time) = time {
             finish.best_lap_time = Some(finish.best_lap_time.map_or(time, |best| best.min(time)));
         }
     }
 
     entry.is_finished = entry.race_outcome.is_none();
     entry.finish_timing = car.finish_timing.filter(|_| entry.is_finished);
-    entry.laps_completed = car
-        .finish_timing
-        .map_or(finish.completed, |timing| timing.laps_completed);
+    entry.laps_completed = finish.completed;
     entry.lap = finish.completed.saturating_add(1);
     entry.last_lap_time = car.lap_history.time;
     entry.last_lap_delta = car.lap_history.delta();
     entry.best_lap_time = finish.best_lap_time;
+}
+
+fn valid_lap_time(time: Option<f32>) -> Option<f32> {
+    time.filter(|time| time.is_finite() && *time > 0.0)
 }
 
 impl RaceTiming {
@@ -384,7 +420,12 @@ impl RaceTiming {
                     }
                 }
                 if car.finished || entry.race_outcome.is_some() {
-                    apply_finish_snapshot(car, entry, result);
+                    apply_finish_snapshot(
+                        car,
+                        entry,
+                        result,
+                        (!session.results_official).then_some(car_idx),
+                    );
                     state.towed_cars.remove(&entry.car_idx);
                     state.tow_finish_baselines.remove(&entry.car_idx);
                     continue;
@@ -474,7 +515,7 @@ impl RaceTiming {
                             },
                             state.tick,
                         );
-                        apply_finish_snapshot(car, entry, result);
+                        apply_finish_snapshot(car, entry, result, None);
                         state.towed_cars.remove(&entry.car_idx);
                         state.tow_finish_baselines.remove(&entry.car_idx);
                     }

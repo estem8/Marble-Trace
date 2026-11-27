@@ -370,6 +370,19 @@ describe('getStandingsGap', () => {
     });
   });
 
+  it('uses the reported lap deficit when pit-road progress is unavailable', () => {
+    const driver = makeGapEntry({
+      onPitRoad: true,
+      resultsPositionLap: 2,
+      f2Time: 15,
+    });
+    const reference = makeGapEntry({ resultsPositionLap: 1, f2Time: 6 });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({ kind: 'laps', laps: 1 });
+  });
+
   it('uses live progress over a stale results lap gap across the line', () => {
     const driver = makeGapEntry({
       lap: 10,

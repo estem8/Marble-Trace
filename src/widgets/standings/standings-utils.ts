@@ -700,7 +700,7 @@ export const getStandingsGap = (
       return EMPTY_GAP;
     }
 
-    if (lapsDown > 0 && !useLiveTiming) {
+    if (lapsDown > 0 && (!useLiveTiming || progressBehind === null)) {
       return { kind: 'laps', laps: lapsDown };
     }
 

@@ -248,6 +248,7 @@ enum RaceStart {
 struct FrozenFinish {
     completed: i32,
     best_lap_time: Option<f32>,
+    live_time_at_crossing: Option<f32>,
     tick: u64,
 }
 
@@ -920,6 +921,7 @@ fn compute_frame(
             &locked_state.race_timing,
             live_positions,
             car_idx,
+            &results_positions_map,
         ))
     } else {
         match ranking_mode {
@@ -1527,18 +1529,20 @@ fn assign_caution_positions(
     state: &RaceTiming,
     live_positions: bool,
     car_idx: &CarIdxFrame,
+    results: &HashMap<i32, &ResultPosition>,
 ) -> StandingsOrder {
+    let is_active = |entry: &DriverEntry| {
+        !entry.is_retired
+            && !entry.is_towed
+            && !entry.is_finished
+            && entry.track_surface != TrackSurface::NotInWorld
+            && !awaits_pit_start_position(entry, state)
+    };
     let mut positions = HashSet::with_capacity(entries.len());
     let published = live_positions
         && entries
             .iter()
-            .filter(|entry| {
-                !entry.is_retired
-                    && !entry.is_towed
-                    && !entry.is_finished
-                    && entry.track_surface != TrackSurface::NotInWorld
-                    && !awaits_pit_start_position(entry, state)
-            })
+            .filter(|entry| is_active(entry))
             .all(|entry| {
                 car_idx
                     .car_idx_position
@@ -1547,25 +1551,35 @@ fn assign_caution_positions(
             });
 
     if published {
-        entries.sort_by_key(|entry| {
-            (
-                awaits_pit_start_position(entry, state),
-                official_sort_key(entry),
-                entry.car_idx,
-            )
-        });
-        let ranked_count =
-            entries.partition_point(|entry| !awaits_pit_start_position(entry, state));
-        let ranked = &mut entries[..ranked_count];
-        number_positions(ranked);
-        for entry in ranked {
-            if entry.position > 0 {
-                entry.live_position = entry.position;
+        positions.clear();
+        let mut class_positions = HashSet::with_capacity(entries.len());
+        // An off-track row can still carry an old scoring slot.
+        entries.sort_by_key(|entry| (!is_active(entry), entry.car_idx));
+        for entry in entries.iter_mut() {
+            if awaits_pit_start_position(entry, state) {
+                continue;
             }
-            if entry.class_position > 0 {
-                entry.live_class_position = entry.class_position;
-            }
+
+            let index = entry.car_idx as usize;
+            let result = results.get(&entry.car_idx);
+            entry.live_position = car_idx
+                .car_idx_position
+                .get(index)
+                .copied()
+                .filter(|&rank| rank > 0)
+                .or_else(|| result.map(|result| result.position))
+                .filter(|&rank| rank > 0 && positions.insert(rank))
+                .unwrap_or(0);
+            entry.live_class_position = car_idx
+                .car_idx_class_position
+                .get(index)
+                .copied()
+                .filter(|&rank| rank > 0)
+                .or_else(|| result.and_then(|result| result.class_position))
+                .filter(|&rank| rank > 0 && class_positions.insert((entry.car_class_id, rank)))
+                .unwrap_or(0);
         }
+        entries.sort_by_key(|entry| (entry.live_position == 0, entry.live_position, entry.car_idx));
         return StandingsOrder::Caution;
     }
 
@@ -1691,8 +1705,8 @@ fn compute_ir_deltas(entries: &[DriverEntry], use_live: bool) -> HashMap<i32, Ir
         };
 
         // `class_position` decides who started: a car the sim has not placed at all
-        // (garage, never left the pits) is registered but not racing. `assign_live_positions`
-        // hands every entry a `live_class_position`, so it cannot make that call.
+        // (garage, never left the pits) is registered but not racing. A missing
+        // live rank can also be a temporary hold for a driver who did start.
         if entry.class_position <= 0 {
             non_starters
                 .entry(entry.car_class_id)
@@ -1715,7 +1729,7 @@ fn compute_ir_deltas(entries: &[DriverEntry], use_live: bool) -> HashMap<i32, Ir
     }
 
     for (class_id, mut class_starters) in starters {
-        if class_starters.len() < 2 {
+        if class_starters.len() < 2 || class_starters.iter().any(|&(_, rank, _)| rank <= 0) {
             continue;
         }
 

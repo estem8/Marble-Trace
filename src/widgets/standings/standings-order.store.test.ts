@@ -261,6 +261,24 @@ describe('StandingsOrderStore', () => {
     }
   });
 
+  it('uses the short arrow timeout for an overall move placed immediately', () => {
+    vi.useFakeTimers();
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 1), entry(2, 1, 1)], true, 0);
+      order.process([entry(1, 2, 1), entry(2, 1, 1)], true, 100);
+      expect(order.renderedRanks.get(1)?.overall).toBe(2);
+      expect(order.positionChanges.get(1)).toBe('down');
+
+      vi.advanceTimersByTime(MOVE_DURATION_MS + ARROW_LINGER_MS);
+      expect(order.positionChanges.has(1)).toBe(false);
+    } finally {
+      order.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('waits before releasing a class rank with overall ranks contested', () => {
     const order = new StandingsOrderStore();
 
@@ -291,6 +309,23 @@ describe('StandingsOrderStore', () => {
       order.process([entry(1, 1, 1), entry(2, 2, 2)], true, 200);
       order.process(null, true, 1000);
       expect(order.renderedRanks.get(1)).toEqual({ overall: 1, inClass: 1 });
+    } finally {
+      order.dispose();
+    }
+  });
+
+  it('clears a missing class rank even while the overall rank changes', () => {
+    const order = new StandingsOrderStore();
+
+    try {
+      order.process([entry(1, 1, 1), entry(2, 2, 2)], true, 0);
+      order.process([entry(1, 1, 0), entry(2, 2, 2)], true, 100);
+      order.process([entry(1, 3, 0), entry(2, 2, 2)], true, 600);
+
+      order.process(null, true, 999);
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 1, inClass: 1 });
+      order.process(null, true, 1000);
+      expect(order.renderedRanks.get(1)).toEqual({ overall: 1, inClass: 0 });
     } finally {
       order.dispose();
     }

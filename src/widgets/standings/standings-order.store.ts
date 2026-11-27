@@ -8,7 +8,12 @@ const ARROW_LINGER_MS = 400;
 
 export type Rank = { overall: number; inClass: number };
 type PositionChangeDirection = 'up' | 'down';
-type PendingPosition = { rank: Rank; classId: number; since: number };
+type PendingPosition = {
+  rank: Rank;
+  classId: number;
+  since: number;
+  classMissingSince?: number;
+};
 
 const sameRank = (first: Rank, second: Rank): boolean =>
   first.overall === second.overall && first.inClass === second.inClass;
@@ -98,13 +103,10 @@ export class StandingsOrderStore {
   process(entries: CarIdentity[] | null, useTrackOrder: boolean, now: number) {
     if (entries) {
       this.updateOrder(entries, useTrackOrder, now);
+      this.trackPositionChanges(entries, useTrackOrder);
     }
 
     this.settlePending(now);
-
-    if (entries) {
-      this.trackPositionChanges(entries, useTrackOrder);
-    }
   }
 
   reset() {
@@ -202,7 +204,17 @@ export class StandingsOrderStore {
         pending.classId !== classId ||
         !sameRank(pending.rank, rank)
       ) {
-        this.pending.set(carIdx, { rank, classId, since: now });
+        const classMissingSince = !isPlaced(rank.inClass)
+          ? ((pending?.classId === classId
+              ? pending.classMissingSince
+              : undefined) ?? now)
+          : undefined;
+        this.pending.set(carIdx, {
+          rank,
+          classId,
+          since: now,
+          classMissingSince,
+        });
       }
     }
   }
@@ -223,9 +235,12 @@ export class StandingsOrderStore {
 
       if (now - pending.since >= ORDER_SETTLE_MS) {
         ready.set(carIdx, pending);
-      } else if (
+      }
+
+      if (
         isPlaced(previousRank?.inClass ?? 0) &&
-        !isPlaced(rank.inClass)
+        pending.classMissingSince !== undefined &&
+        now - pending.classMissingSince < ORDER_SETTLE_MS
       ) {
         deferredClassClears.add(carIdx);
       }
