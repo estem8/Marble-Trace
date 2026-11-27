@@ -164,6 +164,29 @@ describe('StandingsWidgetStore — per instance', () => {
     }
   });
 
+  it('clears an unplaced pit starter on the first race frame', () => {
+    const table = openTable(core, STANDINGS);
+    const [, pitStarter] = setField(
+      core,
+      [
+        { position: 1, livePosition: 1 },
+        { position: 2, livePosition: 2 },
+      ],
+      'officialGrid'
+    );
+
+    setField(
+      core,
+      [
+        { position: 1, livePosition: 1 },
+        { position: 0, livePosition: 0 },
+      ],
+      'track'
+    );
+
+    expect(table.renderedRanks.get(pitStarter)?.overall).toBe(0);
+  });
+
   afterEach(() => {
     core.dispose();
   });

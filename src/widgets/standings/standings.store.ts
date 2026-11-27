@@ -82,15 +82,21 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
           const mode = frame?.standingsOrder;
           const previousMode = previous?.[0]?.standingsOrder;
           const orderChanged = identitiesChanged || mode !== previousMode;
+          const startsRace =
+            (previousMode === 'grid' || previousMode === 'officialGrid') &&
+            (mode === 'track' || mode === 'caution' || mode === 'hold');
 
-          if (mode === 'hold') {
-            this.order.holdRanks();
+          if (
+            startsRace ||
+            ((mode === 'results' || mode === 'officialGrid') && orderChanged)
+          ) {
+            this.order.reset();
+            this.order.process(entries, this.useTrackOrder, performance.now());
             return;
           }
 
-          if ((mode === 'results' || mode === 'officialGrid') && orderChanged) {
-            this.order.reset();
-            this.order.process(entries, this.useTrackOrder, performance.now());
+          if (mode === 'hold') {
+            this.order.holdRanks();
             return;
           }
 

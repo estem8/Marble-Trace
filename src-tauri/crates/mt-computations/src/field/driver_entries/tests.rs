@@ -4145,6 +4145,65 @@ fn test_zeroed_positions_before_the_green_keep_the_grid_order() {
 }
 
 #[test]
+fn pit_starter_has_no_race_rank_until_the_sim_places_it() {
+    let mut session = unpublished_positions_session(SessionType::Race);
+    session.sessions[0].results_positions = vec![result_at(1, 1), result_at(0, 2), result_at(2, 3)];
+    let start_positions = HashMap::from([(0, (2, 2)), (1, (1, 1)), (2, (3, 3))]);
+    let state = Mutex::new(DriverEntriesState::default());
+    let sample = |telemetry: &CarIdxFrame, phase| {
+        compute(
+            telemetry,
+            &session,
+            &start_positions,
+            false,
+            Some(phase),
+            &state,
+        )
+    };
+    let mut telemetry = unpublished_positions_frame();
+    telemetry.car_idx_position = vec![0, 1, 2];
+    telemetry.car_idx_class_position = vec![0, 1, 2];
+    telemetry.car_idx_lap = vec![0, 1, 1];
+    telemetry.car_idx_laps_completed.fill(0);
+
+    let grid = sample(&telemetry, SessionState::ParadeLaps);
+    assert_eq!(player_entry(&grid).live_position, 2);
+
+    let green = sample(&telemetry, SessionState::Racing);
+    let pit_starter = player_entry(&green);
+    assert_eq!(pit_starter.start_pos_overall, Some(2));
+    assert_eq!(pit_starter.start_pos_class, Some(2));
+    assert_eq!((pit_starter.position, pit_starter.class_position), (0, 0));
+    assert_eq!(
+        (pit_starter.live_position, pit_starter.live_class_position),
+        (0, 0)
+    );
+    assert_eq!(green.entries.last().unwrap().car_idx, 0);
+    assert_eq!(green.entries[1].live_class_position, 2);
+
+    telemetry.car_idx_lap[0] = 1;
+    telemetry.car_idx_on_pit_road[0] = false;
+    telemetry.car_idx_track_surface[0] = TrackSurface::OnTrack;
+    let still_unclassified = sample(&telemetry, SessionState::Racing);
+    assert_eq!(player_entry(&still_unclassified).live_position, 0);
+
+    telemetry.car_idx_position[0] = 3;
+    telemetry.car_idx_class_position[0] = 3;
+    let classified = sample(&telemetry, SessionState::Racing);
+    let pit_starter = player_entry(&classified);
+    assert_eq!((pit_starter.position, pit_starter.class_position), (3, 3));
+    assert_eq!(
+        (pit_starter.live_position, pit_starter.live_class_position),
+        (3, 3)
+    );
+
+    telemetry.car_idx_position[0] = 0;
+    telemetry.car_idx_class_position[0] = 0;
+    let transient_dropout = sample(&telemetry, SessionState::Racing);
+    assert_eq!(player_entry(&transient_dropout).position, 3);
+}
+
+#[test]
 fn test_grid_position_does_not_change_when_a_car_ahead_loads() {
     let session = two_car_race_session();
     let start_positions = HashMap::from([(0, (2, 2)), (1, (1, 1))]);

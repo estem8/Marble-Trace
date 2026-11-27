@@ -231,6 +231,18 @@ struct CarRaceState {
     lap_history: LapHistory,
     last_live_lap_time: Option<f32>,
     inferred_lap_timing: Option<InferredLapTiming>,
+    race_start: RaceStart,
+}
+
+#[derive(Default)]
+enum RaceStart {
+    #[default]
+    Unseen,
+    OnTrack,
+    FromPits {
+        position: Option<i32>,
+        class_position: Option<i32>,
+    },
 }
 
 struct FrozenFinish {
@@ -443,6 +455,10 @@ fn compute_frame(
 
     let live_positions =
         live_positions_published(car_idx, &deduped_drivers, player_car_idx, results);
+    let observed_grid = locked_state
+        .race_timing
+        .previous_session_state
+        .is_some_and(|phase| !race_has_started(Some(phase)));
 
     let mut evidenced_laps_by_car = HashMap::new();
     let mut observed_wraps = HashSet::new();
@@ -646,6 +662,28 @@ fn compute_frame(
                 .cars
                 .entry(driver.car_idx)
                 .or_default();
+            if ranking_mode == RankingMode::TrackOrder
+                && in_world
+                && matches!(car.race_start, RaceStart::Unseen)
+            {
+                let starting_in_pits = session_state == Some(SessionState::Racing)
+                    && (observed_grid || result.is_none())
+                    && live_lap.is_none_or(|lap| lap == 1)
+                    && live_laps_completed.is_none_or(|laps| laps == 0)
+                    && (on_pit_road
+                        || matches!(
+                            track_surface,
+                            TrackSurface::InPitStall | TrackSurface::AproachingPits
+                        ));
+                car.race_start = if starting_in_pits {
+                    RaceStart::FromPits {
+                        position: None,
+                        class_position: None,
+                    }
+                } else {
+                    RaceStart::OnTrack
+                };
+            }
             if observed_laps.is_some() {
                 car.display_laps = observed_laps;
                 if in_world || evidenced_laps.is_some() {
@@ -740,30 +778,54 @@ fn compute_frame(
                 )
             };
 
+            let sim_position = car_idx
+                .car_idx_position
+                .get(idx)
+                .copied()
+                .filter(|&pos| live_positions && pos > 0);
+            let sim_class_position = car_idx
+                .car_idx_class_position
+                .get(idx)
+                .copied()
+                .filter(|&pos| live_positions && pos > 0);
+            let result_position = result.map(|result| result.position).filter(|&pos| pos > 0);
+            let result_class_position = result.and_then(|result| result.class_position);
+            let (position, class_position) = match &mut car.race_start {
+                RaceStart::FromPits {
+                    position,
+                    class_position,
+                } => {
+                    // Zero-lap results can still contain the starting grid.
+                    let result_has_race_laps = result_laps.is_some_and(|laps| laps > 0);
+                    *position = sim_position
+                        .or(result_position.filter(|_| result_has_race_laps))
+                        .or(*position);
+                    *class_position = sim_class_position
+                        .or(result_class_position.filter(|&pos| result_has_race_laps && pos > 0))
+                        .or(*class_position);
+                    (
+                        position.unwrap_or(0),
+                        class_position.filter(|_| position.is_some()).unwrap_or(0),
+                    )
+                }
+                _ => (
+                    sim_position
+                        .or(result_position)
+                        .or(start_overall)
+                        .unwrap_or(0),
+                    sim_class_position
+                        .or(result_class_position)
+                        .or(start_class)
+                        .unwrap_or(0),
+                ),
+            };
+
             Some(DriverEntry {
                 car_idx: driver.car_idx,
                 car_class_id: driver.car_class_id,
                 tire_compound,
-                position: car_idx
-                    .car_idx_position
-                    .get(idx)
-                    .copied()
-                    .filter(|&pos| live_positions && pos > 0)
-                    .or_else(|| {
-                        result
-                            .map(|position| position.position)
-                            .filter(|&pos| pos > 0)
-                    })
-                    .or(start_overall)
-                    .unwrap_or(0),
-                class_position: car_idx
-                    .car_idx_class_position
-                    .get(idx)
-                    .copied()
-                    .filter(|&pos| live_positions && pos > 0)
-                    .or_else(|| result.and_then(|position| position.class_position))
-                    .or(start_class)
-                    .unwrap_or(0),
+                position,
+                class_position,
                 live_position: 0,
                 live_class_position: 0,
                 start_pos_overall: start_overall,
@@ -1317,6 +1379,14 @@ fn update_tow_states(entries: &mut [DriverEntry], state: &mut RaceTiming) {
         .retain(|car_idx, _| active_car_indices.contains(car_idx));
 }
 
+fn awaits_pit_start_position(entry: &DriverEntry, state: &RaceTiming) -> bool {
+    !entry.is_finished
+        && state
+            .cars
+            .get(&entry.car_idx)
+            .is_some_and(|car| matches!(car.race_start, RaceStart::FromPits { position: None, .. }))
+}
+
 /// Reorders `entries` into live track order and fills the `live_*` position fields.
 ///
 /// Only cars actually racing are re-ranked by covered distance. Lap distance says
@@ -1351,8 +1421,14 @@ fn assign_race_positions(entries: &mut [DriverEntry], state: &RaceTiming) {
 
     let mut racing: Vec<DriverEntry> = Vec::with_capacity(entries.len());
     let mut non_racing: Vec<DriverEntry> = Vec::new();
+    let mut unplaced = Vec::new();
 
     for entry in entries.iter() {
+        if awaits_pit_start_position(entry, state) {
+            unplaced.push(entry.clone());
+            continue;
+        }
+
         let ranked_by_progress = if recorded_finish(entry).is_some() || entry.is_towed {
             progress_of(entry).is_some()
         } else {
@@ -1415,9 +1491,10 @@ fn assign_race_positions(entries: &mut [DriverEntry], state: &RaceTiming) {
         merged.insert(index, entry);
     }
 
+    number_positions(&mut merged);
+    unplaced.sort_by_key(|entry| entry.car_idx);
+    merged.extend(unplaced);
     entries.clone_from_slice(&merged);
-
-    number_positions(entries);
 }
 
 fn apply_official_results(entries: &mut [DriverEntry], results: &HashMap<i32, &ResultPosition>) {
@@ -1460,6 +1537,7 @@ fn assign_caution_positions(
                     && !entry.is_towed
                     && !entry.is_finished
                     && entry.track_surface != TrackSurface::NotInWorld
+                    && !awaits_pit_start_position(entry, state)
             })
             .all(|entry| {
                 car_idx
@@ -1469,8 +1547,18 @@ fn assign_caution_positions(
             });
 
     if published {
-        assign_static_positions(entries, official_sort_key);
-        for entry in entries {
+        entries.sort_by_key(|entry| {
+            (
+                awaits_pit_start_position(entry, state),
+                official_sort_key(entry),
+                entry.car_idx,
+            )
+        });
+        let ranked_count =
+            entries.partition_point(|entry| !awaits_pit_start_position(entry, state));
+        let ranked = &mut entries[..ranked_count];
+        number_positions(ranked);
+        for entry in ranked {
             if entry.position > 0 {
                 entry.live_position = entry.position;
             }
@@ -1482,6 +1570,9 @@ fn assign_caution_positions(
     }
 
     for entry in entries.iter_mut() {
+        if awaits_pit_start_position(entry, state) {
+            continue;
+        }
         let (position, class_position) = state
             .last_ranks
             .get(&entry.car_idx)
