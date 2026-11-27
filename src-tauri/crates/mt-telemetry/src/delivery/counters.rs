@@ -195,6 +195,7 @@ mod tests {
         DriverEntriesFrame {
             entries: vec![],
             player_car_idx: 0,
+            standings_order: None,
             pit_lane_loss_s: None,
             pit_exit_loss_s: None,
         }

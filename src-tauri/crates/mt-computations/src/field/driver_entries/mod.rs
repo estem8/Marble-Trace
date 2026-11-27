@@ -13,6 +13,7 @@ use crate::{ComputeContext, ComputedOutput, Processor, ProcessorId, TickRate};
 use mt_model::contract::capabilities::Capabilities;
 use mt_model::sim::cars::CarIdxFrame;
 use mt_model::sim::enums::{PitState, SessionState, TrackSurface};
+use mt_model::sim::flags::{CAUTION, CAUTION_WAVING, DISQUALIFY};
 use mt_model::sim::session::{
     CarEntry, QualifyResultEntry, ResultPosition, SessionSnapshot, SessionType,
 };
@@ -91,6 +92,8 @@ pub struct DriverEntry {
     pub results_position_time: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_timing: Option<FinishTiming>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race_outcome: Option<RaceOutcome>,
     /// The sim marked the car as retired or disqualified (`ReasonOutId` != 0).
     /// A car merely sitting in the garage is *not* retired.
     pub is_retired: bool,
@@ -122,6 +125,26 @@ pub struct FinishTiming {
     pub laps_completed: i32,
     pub crossing_time: Option<f64>,
     pub official_gap: Option<f32>,
+}
+
+#[cfg_attr(feature = "dev", derive(specta::Type))]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RaceOutcome {
+    Dnf,
+    Dq,
+}
+
+#[cfg_attr(feature = "dev", derive(specta::Type))]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum StandingsOrder {
+    Grid,
+    OfficialGrid,
+    Track,
+    Caution,
+    Hold,
+    Results,
 }
 
 #[derive(Clone, Copy)]
@@ -181,9 +204,12 @@ impl LapHistory {
             }
         }
 
-        (number == self.number)
-            .then(|| self.time.zip(self.previous_time))
-            .flatten()
+        (number == self.number).then(|| self.delta()).flatten()
+    }
+
+    fn delta(&self) -> Option<f32> {
+        self.time
+            .zip(self.previous_time)
             .map(|(last, previous)| last - previous)
     }
 }
@@ -195,15 +221,22 @@ struct InferredLapTiming {
 
 #[derive(Default)]
 struct CarRaceState {
-    started: bool,
     finished: bool,
     finish_timing: Option<FinishTiming>,
+    finish: Option<FrozenFinish>,
+    disqualified: bool,
     // Includes a completed lap reported on the tick the car leaves the world.
     last_in_world_laps: Option<i32>,
     display_laps: Option<i32>,
     lap_history: LapHistory,
     last_live_lap_time: Option<f32>,
     inferred_lap_timing: Option<InferredLapTiming>,
+}
+
+struct FrozenFinish {
+    completed: i32,
+    best_lap_time: Option<f32>,
+    tick: u64,
 }
 
 #[derive(Default)]
@@ -216,8 +249,12 @@ pub struct DriverEntriesState {
 struct RaceTiming {
     cars: HashMap<i32, CarRaceState>,
     previous_finish_samples: HashMap<i32, FinishSample>,
-    /// Session the latched finishers belong to — a new session clears them.
-    timing_session_num: Option<i32>,
+    previous_session_state: Option<SessionState>,
+    session_key: Option<(Option<i32>, i32)>,
+    last_session_time: Option<f64>,
+    resuming: bool,
+    observed_before_checkered: bool,
+    tick: u64,
     /// Completed-lap count of every car on the previous tick, used as the baseline
     /// the finish latch compares against once the checkered flag comes out. Laps
     /// *completed*, not the lap being driven — see `resolve_laps_completed`.
@@ -232,13 +269,16 @@ struct RaceTiming {
     /// picked up — a car being carried has no lap distance of its own.
     towed_cars: HashMap<i32, f64>,
     /// Lap count at the flag for towed cars, held until live telemetry shows
-    /// progress or CoolDown classifies them.
+    /// progress or the official results classify them.
     tow_finish_baselines: HashMap<i32, i32>,
     /// Track surface and pit-road flag of every car on the previous tick.
     previous_location: HashMap<i32, (TrackSurface, bool)>,
     /// Lap progress of every car on the previous tick, kept so a car that vanishes
     /// mid-lap can still be ranked by where it actually was.
     previous_progress: HashMap<i32, f64>,
+    last_ranks: HashMap<i32, (i32, i32)>,
+    under_caution: bool,
+    official_grid: HashMap<i32, (i32, i32)>,
 }
 
 #[cfg_attr(feature = "dev", derive(specta::Type))]
@@ -247,6 +287,8 @@ struct RaceTiming {
 pub struct DriverEntriesFrame {
     pub entries: Vec<DriverEntry>,
     pub player_car_idx: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standings_order: Option<StandingsOrder>,
     /// What driving through the pit lane costs over the same stretch at racing
     /// pace, measured from the stops the field has made. `None` until one has
     /// been timed from entry to exit. See `PitTimingTracker`.
@@ -284,6 +326,36 @@ pub(super) fn compute_with_clock(
     state: &Mutex<DriverEntriesState>,
     session_time: Option<f64>,
 ) -> DriverEntriesFrame {
+    compute_frame(
+        car_idx,
+        session,
+        start_positions,
+        compute_ir_delta,
+        session_state,
+        state,
+        FrameContext {
+            time: session_time,
+            flags: None,
+            freeze_motion: false,
+        },
+    )
+}
+
+struct FrameContext {
+    time: Option<f64>,
+    flags: Option<u32>,
+    freeze_motion: bool,
+}
+
+fn compute_frame(
+    car_idx: &CarIdxFrame,
+    session: &SessionSnapshot,
+    start_positions: &HashMap<i32, (i32, i32)>,
+    compute_ir_delta: bool,
+    session_state: Option<SessionState>,
+    state: &Mutex<DriverEntriesState>,
+    context: FrameContext,
+) -> DriverEntriesFrame {
     let player_car_idx = session.player_car_idx;
     let drivers = &session.cars;
 
@@ -291,6 +363,7 @@ pub(super) fn compute_with_clock(
         return DriverEntriesFrame {
             entries: vec![],
             player_car_idx,
+            standings_order: None,
             pit_lane_loss_s: None,
             pit_exit_loss_s: None,
         };
@@ -332,13 +405,12 @@ pub(super) fn compute_with_clock(
         .unwrap_or(&[]);
 
     let is_race = current_session.is_some_and(|s| s.session_type == SessionType::Race);
+    let results_official = is_race
+        && current_session.is_some_and(|s| s.results_official == Some(true))
+        && !results.is_empty();
     let ranking_mode = resolve_ranking_mode(is_race, session_state);
-    let reconstruct_grid = ranking_mode == RankingMode::Grid
-        && session.is_official
-        && !session.team_racing
-        && results.is_empty()
-        && (!session.qualify_results.is_empty() || start_positions.is_empty());
-
+    let sim_grid =
+        ranking_mode == RankingMode::Grid && results.iter().any(|result| result.position > 0);
     let mut qualify_times: HashMap<i32, f32> = HashMap::new();
 
     for entry in &session.qualify_results {
@@ -347,9 +419,21 @@ pub(super) fn compute_with_clock(
         }
     }
 
-    locked_state
-        .race_timing
-        .begin_session(session.current_session_num);
+    locked_state.race_timing.begin_session(
+        session.sub_session_id,
+        session.current_session_num,
+        context.time,
+    );
+    if sim_grid {
+        locked_state.race_timing.official_grid = parse_start_positions(results);
+    }
+    let confirmed_grid =
+        ranking_mode == RankingMode::Grid && !locked_state.race_timing.official_grid.is_empty();
+    let reconstruct_grid = ranking_mode == RankingMode::Grid
+        && !confirmed_grid
+        && session.is_official
+        && !session.team_racing
+        && (!session.qualify_results.is_empty() || start_positions.is_empty());
 
     let mut results_positions_map: HashMap<i32, &ResultPosition> = HashMap::new();
 
@@ -364,47 +448,39 @@ pub(super) fn compute_with_clock(
     let mut observed_wraps = HashSet::new();
     let mut entries: Vec<DriverEntry> = deduped_drivers
         .iter()
-        .filter(|d| {
-            if d.is_pace_car || d.is_spectator {
-                return false;
-            }
-
-            if reconstruct_grid {
-                return true;
-            }
-
-            if results_positions_map.contains_key(&d.car_idx) {
-                return true;
-            }
-
-            // Keep grid slots occupied while their drivers are still loading.
-            if ranking_mode == RankingMode::Grid && start_positions.contains_key(&d.car_idx) {
-                return true;
-            }
-
-            let idx = d.car_idx as usize;
-
-            if idx >= car_idx.car_idx_position.len() {
-                return false;
-            }
-
-            if d.car_idx == player_car_idx {
-                return true;
-            }
-
-            let pos = car_idx.car_idx_position.get(idx).copied().unwrap_or(0);
-            let lap_pct = car_idx
-                .car_idx_lap_dist_pct
-                .get(idx)
-                .copied()
-                .unwrap_or(-1.0);
-
-            pos > 0 || lap_pct >= 0.0
-        })
-        .map(|driver| {
+        .filter_map(|driver| {
             let idx = driver.car_idx as usize;
-
             let result = results_positions_map.get(&driver.car_idx).copied();
+            let retained_finisher = locked_state
+                .race_timing
+                .cars
+                .get(&driver.car_idx)
+                .is_some_and(|car| car.finished);
+            let start_slot = locked_state
+                .race_timing
+                .official_grid
+                .get(&driver.car_idx)
+                .or_else(|| start_positions.get(&driver.car_idx))
+                .copied();
+            let has_grid_slot = ranking_mode == RankingMode::Grid && start_slot.is_some();
+            let is_live = idx < car_idx.car_idx_position.len()
+                && (driver.car_idx == player_car_idx
+                    || car_idx.car_idx_position[idx] > 0
+                    || car_idx
+                        .car_idx_lap_dist_pct
+                        .get(idx)
+                        .is_some_and(|&pct| pct >= 0.0));
+            if driver.is_pace_car
+                || driver.is_spectator
+                || !(result.is_some()
+                    || retained_finisher
+                    || has_grid_slot
+                    || reconstruct_grid
+                    || is_live)
+            {
+                return None;
+            }
+
             let (res_lap, res_time) = result
                 .map(|position| (position.lap, position.time))
                 .unwrap_or((None, None));
@@ -425,7 +501,6 @@ pub(super) fn compute_with_clock(
                 String::new()
             };
 
-            let start_slot = start_positions.get(&driver.car_idx).copied();
             let start_overall = start_slot
                 .map(|(overall, _)| overall)
                 .filter(|&pos| pos > 0);
@@ -654,14 +729,18 @@ pub(super) fn compute_with_clock(
                         .is_some_and(|(live, recorded)| {
                             (live - recorded).abs() < RESULT_LAP_TIME_TOLERANCE_S
                         });
-            let last_lap_delta = car.lap_history.observe(
-                laps_completed.unwrap_or(0),
-                last_lap_time,
-                results_confirm_time,
-                in_world,
-            );
+            let last_lap_delta = if car.finished {
+                car.lap_history.delta()
+            } else {
+                car.lap_history.observe(
+                    laps_completed.unwrap_or(0),
+                    last_lap_time,
+                    results_confirm_time,
+                    in_world,
+                )
+            };
 
-            DriverEntry {
+            Some(DriverEntry {
                 car_idx: driver.car_idx,
                 car_class_id: driver.car_class_id,
                 tire_compound,
@@ -731,6 +810,7 @@ pub(super) fn compute_with_clock(
                 results_position_lap: res_lap,
                 results_position_time: res_time,
                 finish_timing: None,
+                race_outcome: None,
                 is_retired,
                 is_finished: false,
                 is_towed: false,
@@ -739,7 +819,7 @@ pub(super) fn compute_with_clock(
                 pit_lap: None,
                 pit_elapsed_s: None,
                 last_pit_s: None,
-            }
+            })
         })
         .collect();
 
@@ -758,24 +838,77 @@ pub(super) fn compute_with_clock(
         &results_positions_map,
         &observed_wraps,
         evidenced_laps_by_car,
-        is_race.then(|| FinishSession {
+        is_race.then_some(FinishSession {
             state: session_state,
-            time: session_time,
-            results_official: current_session
-                .is_some_and(|session| session.results_official == Some(true)),
+            time: context.time,
+            results_official,
         }),
     );
 
-    match ranking_mode {
-        RankingMode::TrackOrder => {
-            assign_live_positions(&mut entries, &locked_state.race_timing.towed_cars)
+    if let Some(flags) = context.flags {
+        locked_state.race_timing.under_caution = flags & (CAUTION | CAUTION_WAVING) != 0;
+    }
+    let caution = ranking_mode == RankingMode::TrackOrder && locked_state.race_timing.under_caution;
+    let standings_order = if results_official {
+        apply_official_results(&mut entries, &results_positions_map);
+        Some(StandingsOrder::Results)
+    } else if caution {
+        Some(assign_caution_positions(
+            &mut entries,
+            &locked_state.race_timing,
+            live_positions,
+            car_idx,
+        ))
+    } else {
+        match ranking_mode {
+            RankingMode::TrackOrder => {
+                assign_race_positions(&mut entries, &locked_state.race_timing);
+                Some(StandingsOrder::Track)
+            }
+            RankingMode::Grid if confirmed_grid => {
+                apply_confirmed_grid(&mut entries, &locked_state.race_timing.official_grid);
+                Some(StandingsOrder::OfficialGrid)
+            }
+            RankingMode::Grid if reconstruct_grid => {
+                assign_reconstructed_grid(&mut entries);
+                Some(StandingsOrder::Grid)
+            }
+            RankingMode::Grid => {
+                assign_static_positions(&mut entries, grid_sort_key);
+                for entry in &mut entries {
+                    entry.position = entry.live_position;
+                    entry.class_position = entry.live_class_position;
+                }
+                if start_positions.is_empty() {
+                    Some(StandingsOrder::Grid)
+                } else {
+                    Some(StandingsOrder::OfficialGrid)
+                }
+            }
+            RankingMode::Official => {
+                assign_static_positions(&mut entries, official_sort_key);
+                None
+            }
         }
-        RankingMode::Grid if reconstruct_grid => assign_reconstructed_grid(&mut entries),
-        RankingMode::Grid => assign_static_positions(&mut entries, grid_sort_key),
-        RankingMode::Official => assign_static_positions(&mut entries, official_sort_key),
+    };
+    if is_race && standings_order != Some(StandingsOrder::Hold) {
+        let ranks = &mut locked_state.race_timing.last_ranks;
+        ranks.clear();
+        ranks.extend(entries.iter().map(|entry| {
+            (
+                entry.car_idx,
+                (entry.live_position, entry.live_class_position),
+            )
+        }));
     }
 
     for entry in &mut entries {
+        if context.freeze_motion && (entry.is_finished || entry.race_outcome.is_some()) {
+            entry.lap_dist_pct = None;
+            entry.est_time = 0.0;
+            entry.f2_time = None;
+        }
+
         let is_live_leader =
             live_positions && entry.live_position == 1 && entry.lap_dist_pct.is_some();
 
@@ -815,6 +948,11 @@ pub(super) fn compute_with_clock(
         .retain(|k, _| active_car_indices.contains(k));
 
     for entry in &mut entries {
+        if context.freeze_motion && (entry.is_finished || entry.race_outcome.is_some()) {
+            locked_state.pit_states.remove(&entry.car_idx);
+            continue;
+        }
+
         let prev = locked_state
             .pit_states
             .get(&entry.car_idx)
@@ -844,6 +982,7 @@ pub(super) fn compute_with_clock(
     DriverEntriesFrame {
         entries,
         player_car_idx,
+        standings_order,
         pit_lane_loss_s: None,
         pit_exit_loss_s: None,
     }
@@ -1196,16 +1335,25 @@ fn update_tow_states(entries: &mut [DriverEntry], state: &mut RaceTiming) {
 /// the table while the field drives past it. They are ranked by lap progress like
 /// racing cars — frozen at where they were picked up while they are out of the
 /// world, and by their real progress again once the truck drops them off.
-fn assign_live_positions(entries: &mut [DriverEntry], towed_progress: &HashMap<i32, f64>) {
+fn assign_race_positions(entries: &mut [DriverEntry], state: &RaceTiming) {
+    let recorded_finish = |entry: &DriverEntry| {
+        entry
+            .is_finished
+            .then(|| state.cars.get(&entry.car_idx)?.finish.as_ref())
+            .flatten()
+    };
     let progress_of = |entry: &DriverEntry| -> Option<f64> {
-        lap_progress(entry).or_else(|| towed_progress.get(&entry.car_idx).copied())
+        recorded_finish(entry)
+            .map(|finish| f64::from(finish.completed) + 1.0)
+            .or_else(|| lap_progress(entry))
+            .or_else(|| state.towed_cars.get(&entry.car_idx).copied())
     };
 
     let mut racing: Vec<DriverEntry> = Vec::with_capacity(entries.len());
     let mut non_racing: Vec<DriverEntry> = Vec::new();
 
     for entry in entries.iter() {
-        let ranked_by_progress = if entry.is_towed {
+        let ranked_by_progress = if recorded_finish(entry).is_some() || entry.is_towed {
             progress_of(entry).is_some()
         } else {
             is_racing(entry) && lap_progress(entry).is_some()
@@ -1218,9 +1366,31 @@ fn assign_live_positions(entries: &mut [DriverEntry], towed_progress: &HashMap<i
         }
     }
 
-    racing.sort_by(|a, b| match (progress_of(a), progress_of(b)) {
-        (Some(left), Some(right)) => right.partial_cmp(&left).unwrap_or(Ordering::Equal),
-        _ => a.position.cmp(&b.position),
+    racing.sort_by(|first, second| {
+        let first_progress = progress_of(first).unwrap_or_default();
+        let second_progress = progress_of(second).unwrap_or_default();
+        let lap_order = second_progress.floor().total_cmp(&first_progress.floor());
+        lap_order.then_with(|| match (recorded_finish(first), recorded_finish(second)) {
+            (Some(first_finish), Some(second_finish)) => first_finish
+                .tick
+                .cmp(&second_finish.tick)
+                .then_with(|| {
+                    let time = |entry: &DriverEntry| {
+                        entry.finish_timing.and_then(|timing| timing.crossing_time)
+                    };
+                    match (time(first), time(second)) {
+                        (Some(first_time), Some(second_time)) => first_time.total_cmp(&second_time),
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => Ordering::Equal,
+                    }
+                })
+                .then_with(|| official_sort_key(first).cmp(&official_sort_key(second)))
+                .then_with(|| first.car_idx.cmp(&second.car_idx)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => second_progress.total_cmp(&first_progress),
+        })
     });
 
     // Placement below is independent of insertion order, so this only settles cars
@@ -1248,6 +1418,80 @@ fn assign_live_positions(entries: &mut [DriverEntry], towed_progress: &HashMap<i
     entries.clone_from_slice(&merged);
 
     number_positions(entries);
+}
+
+fn apply_official_results(entries: &mut [DriverEntry], results: &HashMap<i32, &ResultPosition>) {
+    for entry in entries.iter_mut() {
+        let result = results.get(&entry.car_idx);
+        entry.position = result.map_or(0, |result| result.position.max(0));
+        entry.class_position = result
+            .and_then(|result| result.class_position)
+            .unwrap_or(0)
+            .max(0);
+        entry.live_position = entry.position;
+        entry.live_class_position = entry.class_position;
+    }
+    entries.sort_by_key(|entry| (entry.position == 0, entry.position, entry.car_idx));
+}
+
+fn apply_confirmed_grid(entries: &mut [DriverEntry], grid: &HashMap<i32, (i32, i32)>) {
+    for entry in entries.iter_mut() {
+        let (position, class_position) = grid.get(&entry.car_idx).copied().unwrap_or_default();
+        entry.position = position;
+        entry.class_position = class_position;
+        entry.live_position = position;
+        entry.live_class_position = class_position;
+    }
+    entries.sort_by_key(|entry| (entry.position == 0, entry.position, entry.car_idx));
+}
+
+fn assign_caution_positions(
+    entries: &mut [DriverEntry],
+    state: &RaceTiming,
+    live_positions: bool,
+    car_idx: &CarIdxFrame,
+) -> StandingsOrder {
+    let mut positions = HashSet::with_capacity(entries.len());
+    let published = live_positions
+        && entries
+            .iter()
+            .filter(|entry| {
+                !entry.is_retired
+                    && !entry.is_towed
+                    && !entry.is_finished
+                    && entry.track_surface != TrackSurface::NotInWorld
+            })
+            .all(|entry| {
+                car_idx
+                    .car_idx_position
+                    .get(entry.car_idx as usize)
+                    .is_some_and(|&rank| rank > 0 && positions.insert(rank))
+            });
+
+    if published {
+        assign_static_positions(entries, official_sort_key);
+        for entry in entries {
+            if entry.position > 0 {
+                entry.live_position = entry.position;
+            }
+            if entry.class_position > 0 {
+                entry.live_class_position = entry.class_position;
+            }
+        }
+        return StandingsOrder::Caution;
+    }
+
+    for entry in entries.iter_mut() {
+        let (position, class_position) = state
+            .last_ranks
+            .get(&entry.car_idx)
+            .copied()
+            .unwrap_or_default();
+        entry.live_position = position;
+        entry.live_class_position = class_position;
+    }
+    entries.sort_by_key(|entry| (entry.live_position == 0, entry.live_position, entry.car_idx));
+    StandingsOrder::Hold
 }
 
 fn assign_reconstructed_grid(entries: &mut [DriverEntry]) {
@@ -1480,26 +1724,38 @@ impl Processor for DriverEntriesProcessor {
     }
 
     fn compute(&mut self, ctx: &ComputeContext) -> Option<ComputedOutput> {
-        let mut frame = compute_with_clock(
+        let mut frame = compute_frame(
             ctx.car_idx,
             ctx.session,
             ctx.start_positions,
             true,
             ctx.session_state,
             &self.state,
-            ctx.session_time,
+            FrameContext {
+                time: ctx.session_time,
+                flags: ctx.session_flags,
+                freeze_motion: true,
+            },
         );
 
         self.speeds.apply(
-            &mut frame.entries,
+            frame
+                .entries
+                .iter_mut()
+                .filter(|entry| !entry.is_finished && entry.race_outcome.is_none()),
             ctx.session_time,
             ctx.track_length_m,
             ctx.car_dynamics.speed,
         );
 
-        let lane_loss =
-            self.pit_timing
-                .apply(&mut frame.entries, ctx.session_time, ctx.session_num);
+        let lane_loss = self.pit_timing.apply(
+            frame
+                .entries
+                .iter_mut()
+                .filter(|entry| !entry.is_finished && entry.race_outcome.is_none()),
+            ctx.session_time,
+            ctx.session_num,
+        );
 
         frame.pit_lane_loss_s = lane_loss.lane_s;
         frame.pit_exit_loss_s = lane_loss.exit_s;
@@ -1509,7 +1765,8 @@ impl Processor for DriverEntriesProcessor {
 
     fn reset(&mut self) {
         if let Ok(mut locked) = self.state.lock() {
-            *locked = DriverEntriesState::default();
+            locked.pit_states.clear();
+            locked.race_timing.disconnect();
         }
 
         self.speeds.reset();

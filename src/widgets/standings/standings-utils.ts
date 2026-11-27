@@ -645,22 +645,33 @@ export const getStandingsGap = (
     return EMPTY_GAP;
   }
 
-  const finishGap = getFinishGap(driver, reference);
-
-  if (finishGap) {
-    return finishGap;
+  if (driver.raceOutcome || reference.raceOutcome) {
+    return EMPTY_GAP;
   }
 
-  const bothFinished = Boolean(driver.finishTiming && reference.finishTiming);
+  const driverFinished = driver.isFinished || Boolean(driver.finishTiming);
+  const referenceFinished =
+    reference.isFinished || Boolean(reference.finishTiming);
+
+  if (driverFinished || referenceFinished) {
+    return driverFinished && referenceFinished
+      ? (getFinishGap(driver, reference) ?? EMPTY_GAP)
+      : EMPTY_GAP;
+  }
 
   const driverProgress = lapProgressOf(driver);
   const referenceProgress = lapProgressOf(reference);
   const progressBehind =
-    driverProgress === null || referenceProgress === null
+    driverProgress === null ||
+    referenceProgress === null ||
+    driver.onPitRoad ||
+    reference.onPitRoad ||
+    driver.isTowed ||
+    reference.isTowed
       ? null
       : referenceProgress - driverProgress;
 
-  if (useLiveTiming && !bothFinished && progressBehind !== null) {
+  if (useLiveTiming && progressBehind !== null) {
     const liveGap = getLiveRaceGap(driver, reference, progressBehind);
 
     if (liveGap) {
@@ -685,23 +696,29 @@ export const getStandingsGap = (
   ) {
     const lapsDown = resLap - referenceLap;
 
-    const hasLiveProgress = useLiveTiming && progressBehind !== null;
+    if (useLiveTiming && lapsDown < 0) {
+      return EMPTY_GAP;
+    }
 
-    if (lapsDown > 0 && !bothFinished && !hasLiveProgress) {
+    if (lapsDown > 0 && !useLiveTiming) {
       return { kind: 'laps', laps: lapsDown };
     }
 
     if (lapsDown === 0 && resTime != null && referenceTime != null) {
       const timeDiff = resTime - referenceTime;
 
-      if (timeDiff > 0) {
+      if (Number.isFinite(timeDiff) && timeDiff > 0) {
         return { kind: 'seconds', seconds: timeDiff };
+      }
+
+      if (useLiveTiming && timeDiff < 0) {
+        return EMPTY_GAP;
       }
     }
   }
 
   // Results can lag behind a live position change.
-  if (!bothFinished && progressBehind !== null && progressBehind >= 1) {
+  if (progressBehind !== null && progressBehind >= 1) {
     return { kind: 'laps', laps: Math.floor(progressBehind) };
   }
 

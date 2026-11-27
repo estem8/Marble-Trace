@@ -1183,6 +1183,7 @@ export type DrivenSession = {
 export type DriverEntriesFrame = {
   entries: DriverEntry[];
   playerCarIdx: number;
+  standingsOrder?: StandingsOrder | null;
   /**
    * What driving through the pit lane costs over the same stretch at racing
    * pace, measured from the stops the field has made. `None` until one has
@@ -1277,6 +1278,7 @@ export type DriverEntry = {
   resultsPositionLap: number | null;
   resultsPositionTime: number | null;
   finishTiming?: FinishTiming | null;
+  raceOutcome?: RaceOutcome | null;
   /**
    * The sim marked the car as retired or disqualified (`ReasonOutId` != 0).
    * A car merely sitting in the garage is *not* retired.
@@ -2372,6 +2374,8 @@ export type RaceFlags = {
   repair: boolean;
 };
 
+export type RaceOutcome = 'dnf' | 'dq';
+
 export type RadarDistances = {
   /**
    * Bumper gap to the nearest car ahead, in meters. `None` when there is none.
@@ -2784,6 +2788,7 @@ export type ResultPosition = {
    * 0 while the car is still running; non-zero once the sim marks it retired/DQ'd.
    */
   reasonOutId: number | null;
+  reasonOutStr?: string | null;
 };
 
 /**
@@ -3299,6 +3304,14 @@ export type SpotterState =
   | 'carLeftRight'
   | 'twoCarsLeft'
   | 'twoCarsRight';
+
+export type StandingsOrder =
+  | 'grid'
+  | 'officialGrid'
+  | 'track'
+  | 'caution'
+  | 'hold'
+  | 'results';
 
 /**
  * Where the stats import reads session files from.

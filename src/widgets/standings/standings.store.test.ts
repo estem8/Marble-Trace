@@ -6,6 +6,7 @@ import { standingsHotkeyTargets } from '@features/hotkey-bindings/hotkey-targets
 import { seedScenario } from '@features/preview/scenarios';
 import { DEFAULT_PREVIEW_SCENARIO_ID } from '@features/preview/scenarios';
 import { computeClassSof } from '@shared/lib/driver';
+import type { StandingsOrder } from '@shared/contracts/generated/bindings';
 import type { WidgetStoreFactory } from '@entities/widget/widget-instances.store';
 import type { WidgetCore } from '@widgets/widget-mount';
 import { StandingsWidgetStore } from './standings.store';
@@ -54,7 +55,8 @@ const swapLeaders = (core: PreviewCore) => {
 // order — each holding that official position and live position.
 const setField = (
   core: PreviewCore,
-  places: { position: number; livePosition: number }[]
+  places: { position: number; livePosition: number }[],
+  standingsOrder?: StandingsOrder
 ) => {
   const frame = core.backendComputed.driverEntries;
 
@@ -65,6 +67,7 @@ const setField = (
   runInAction(() => {
     core.backendComputed.updateDriverEntries({
       ...frame,
+      standingsOrder,
       entries: places.map((place, index) => ({
         ...frame.entries[index],
         ...place,
@@ -104,6 +107,61 @@ describe('StandingsWidgetStore — per instance', () => {
         { ...original, id: COPY_ID },
       ]);
     });
+  });
+
+  it.each(['officialGrid', 'results'] as const)(
+    'applies the %s order together on the first frame',
+    (mode) => {
+      const table = openTable(core, STANDINGS);
+      const [first, second] = setField(
+        core,
+        [
+          { position: 1, livePosition: 1 },
+          { position: 2, livePosition: 2 },
+        ],
+        'track'
+      );
+
+      setField(
+        core,
+        [
+          { position: 2, livePosition: 2 },
+          { position: 1, livePosition: 1 },
+        ],
+        mode
+      );
+
+      expect(table.renderedRanks.get(first)?.overall).toBe(2);
+      expect(table.renderedRanks.get(second)?.overall).toBe(1);
+      expect(table.positionChanges.size).toBe(0);
+    }
+  );
+
+  it('holds the settled order when caution positions are unavailable', () => {
+    vi.useFakeTimers();
+
+    try {
+      const table = openTable(core, STANDINGS);
+      const initial = [
+        { position: 1, livePosition: 1 },
+        { position: 2, livePosition: 2 },
+      ];
+      const [first] = setField(core, initial, 'track');
+      const swapped = [...initial].reverse();
+      setField(core, swapped, 'track');
+      setField(core, swapped, 'hold');
+      vi.advanceTimersByTime(1_000);
+      setField(core, swapped, 'hold');
+
+      expect(table.renderedRanks.get(first)?.overall).toBe(1);
+      setField(core, swapped, 'caution');
+      expect(table.renderedRanks.get(first)?.overall).toBe(1);
+      vi.advanceTimersByTime(1_000);
+      setField(core, swapped, 'caution');
+      expect(table.renderedRanks.get(first)?.overall).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   afterEach(() => {

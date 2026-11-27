@@ -6,7 +6,8 @@ use mt_model::sim::session::ResultPosition;
 
 use super::{
     completed_laps_for_finish, departed_track, finish_sample, is_racing,
-    retain_tow_finish_baselines, DriverEntry, FinishTiming, RaceTiming,
+    retain_tow_finish_baselines, CarRaceState, DriverEntry, FinishTiming, FrozenFinish,
+    RaceOutcome, RaceTiming, DISQUALIFY,
 };
 
 pub(super) struct FinishSession {
@@ -15,14 +16,133 @@ pub(super) struct FinishSession {
     pub(super) results_official: bool,
 }
 
+fn record_finish(car: &mut CarRaceState, entry: &DriverEntry, timing: FinishTiming, tick: u64) {
+    let completed = timing.laps_completed;
+    if car.lap_history.number > completed {
+        car.lap_history = Default::default();
+    }
+    car.lap_history.observe(completed, None, false, false);
+    car.finished = true;
+    car.finish_timing = Some(timing);
+    car.finish = Some(FrozenFinish {
+        completed,
+        best_lap_time: entry.best_lap_time,
+        tick,
+    });
+}
+
+fn apply_official_outcome(
+    car: &mut CarRaceState,
+    entry: &mut DriverEntry,
+    result: &ResultPosition,
+    tick: u64,
+) {
+    if result.reason_out_id.is_some_and(|reason| reason != 0) {
+        let disqualified = result.reason_out_str.as_deref().is_some_and(|reason| {
+            let reason = reason.to_ascii_lowercase();
+            reason.contains("disqualif") || reason == "dq" || reason.starts_with("dq ")
+        }) || car.disqualified;
+        entry.race_outcome = Some(if disqualified {
+            RaceOutcome::Dq
+        } else {
+            RaceOutcome::Dnf
+        });
+        return;
+    }
+
+    let Some(laps_completed) = result.laps_complete.filter(|laps| *laps > 0) else {
+        return;
+    };
+    let crossing_time = car
+        .finish_timing
+        .filter(|timing| timing.laps_completed == laps_completed)
+        .and_then(|timing| timing.crossing_time);
+    let timing = FinishTiming {
+        laps_completed,
+        crossing_time,
+        official_gap: result.time.filter(|time| time.is_finite() && *time >= 0.0),
+    };
+
+    if car.finished {
+        car.finish_timing = Some(timing);
+    } else if result.reason_out_id == Some(0) && result.position > 0 {
+        record_finish(car, entry, timing, tick);
+    }
+}
+
+fn apply_finish_snapshot(
+    car: &mut CarRaceState,
+    entry: &mut DriverEntry,
+    result: Option<&ResultPosition>,
+) {
+    entry.is_towed = false;
+    let Some(finish) = car.finish.as_mut() else {
+        return;
+    };
+    if car.lap_history.time.is_none() {
+        let result_time = result
+            .filter(|result| result.laps_complete == Some(finish.completed))
+            .and_then(|result| result.last_time)
+            .filter(|time| time.is_finite() && *time > 0.0);
+        car.lap_history
+            .observe(finish.completed, result_time, true, false);
+        if let Some(time) = result_time {
+            finish.best_lap_time = Some(finish.best_lap_time.map_or(time, |best| best.min(time)));
+        }
+    }
+
+    entry.is_finished = entry.race_outcome.is_none();
+    entry.finish_timing = car.finish_timing.filter(|_| entry.is_finished);
+    entry.laps_completed = car
+        .finish_timing
+        .map_or(finish.completed, |timing| timing.laps_completed);
+    entry.lap = finish.completed.saturating_add(1);
+    entry.last_lap_time = car.lap_history.time;
+    entry.last_lap_delta = car.lap_history.delta();
+    entry.best_lap_time = finish.best_lap_time;
+}
+
 impl RaceTiming {
-    pub(super) fn begin_session(&mut self, session_num: i32) {
-        if self.timing_session_num != Some(session_num) {
+    pub(super) fn begin_session(
+        &mut self,
+        sub_session_id: Option<i32>,
+        session_num: i32,
+        time: Option<f64>,
+    ) {
+        let key = (sub_session_id, session_num);
+        let restarted = self.resuming
+            && self
+                .last_session_time
+                .zip(time)
+                .is_some_and(|(previous, current)| current < previous);
+        if self.session_key != Some(key) || restarted {
             *self = Self {
-                timing_session_num: Some(session_num),
+                session_key: Some(key),
                 ..Self::default()
             };
         }
+        self.resuming = self.resuming && time.is_none() && self.last_session_time.is_some();
+        self.last_session_time = time.or(self.last_session_time);
+        self.tick += 1;
+    }
+
+    pub(super) fn disconnect(&mut self) {
+        if !self.session_key.is_some_and(|(event, _)| event.is_some()) {
+            *self = Self::default();
+            return;
+        }
+
+        self.cars.retain(|_, car| car.finished);
+        *self = Self {
+            session_key: self.session_key,
+            last_session_time: self.last_session_time,
+            resuming: true,
+            tick: self.tick,
+            cars: std::mem::take(&mut self.cars),
+            laps_at_checkered: self.laps_at_checkered.as_ref().map(|_| HashMap::new()),
+            official_grid: std::mem::take(&mut self.official_grid),
+            ..Self::default()
+        };
     }
 
     pub(super) fn observe_finish(
@@ -39,7 +159,7 @@ impl RaceTiming {
 
         // Finish latch. A car has finished once it crosses the line after the flag came
         // out, which the lap counter records against a baseline snapshotted from the tick
-        // before. Whatever is left over is classified when the race ends (`CoolDown`).
+        // before. The official results can classify a car whose crossing was missed.
         //
         // What that baseline hangs on is the leader, not a flag bit. Neither bit marks the
         // moment the field starts finishing: `CarIdxSessionFlags` carries the flags shown
@@ -49,7 +169,7 @@ impl RaceTiming {
         // seconds after eleven cars had already taken it, and all eleven went into the
         // baseline with their finishing lap already counted. A baseline they cannot exceed
         // is a badge that never appears, so the whole leading group stayed unmarked until
-        // `CoolDown` classified it.
+        // the results classified it.
         //
         // The leader's own crossing is the flag. `SessionState::Checkered` is where the
         // watch starts, not where the latch arms: in a timed race the sim enters it when
@@ -57,11 +177,29 @@ impl RaceTiming {
         // every car one crossing early. So the leader's lap count is recorded there and
         // the latch arms on the tick that count grows.
         if let Some(session) = session {
+            let previous_session_state =
+                std::mem::replace(&mut self.previous_session_state, session.state);
+            let under_checkered = session.state == Some(SessionState::Checkered);
+            let entering_cooldown = previous_session_state == Some(SessionState::Checkered)
+                && session.state == Some(SessionState::CoolDown);
+            self.observed_before_checkered |= matches!(
+                session.state,
+                Some(
+                    SessionState::GetInCar
+                        | SessionState::Warmup
+                        | SessionState::ParadeLaps
+                        | SessionState::Racing
+                )
+            );
             let mut finish_samples = HashMap::with_capacity(entries.len());
             let eligible_car_indices: HashSet<i32> = entries
                 .iter()
                 .filter(|entry| {
                     !entry.is_retired
+                        && !self
+                            .cars
+                            .get(&entry.car_idx)
+                            .is_some_and(|car| car.finished)
                         && (!entry.is_towed && is_racing(entry)
                             || departed_track(entry.car_idx, entry.track_surface, self))
                 })
@@ -70,12 +208,22 @@ impl RaceTiming {
             let eligible_to_cross =
                 |entry: &DriverEntry| eligible_car_indices.contains(&entry.car_idx);
             // The leading lap still counts while its driver is on pit road.
-            let can_set_leading_lap = |entry: &DriverEntry| {
-                eligible_to_cross(entry)
-                    || (!entry.is_retired
+            let pit_car_indices: HashSet<i32> = entries
+                .iter()
+                .filter(|entry| {
+                    !entry.is_retired
                         && !entry.is_towed
                         && entry.on_pit_road
-                        && entry.track_surface != TrackSurface::NotInWorld)
+                        && entry.track_surface != TrackSurface::NotInWorld
+                        && !self
+                            .cars
+                            .get(&entry.car_idx)
+                            .is_some_and(|car| car.finished)
+                })
+                .map(|entry| entry.car_idx)
+                .collect();
+            let can_set_leading_lap = |entry: &DriverEntry| {
+                eligible_to_cross(entry) || pit_car_indices.contains(&entry.car_idx)
             };
             let leader_laps = entries
                 .iter()
@@ -118,6 +266,15 @@ impl RaceTiming {
                 .iter()
                 .filter(|entry| eligible_leader_crossing(entry))
                 .filter(|entry| {
+                    under_checkered
+                        || (entering_cooldown
+                            && finish_sample(entry, car_idx, session.time)
+                                .zip(self.previous_finish_samples.get(&entry.car_idx))
+                                .is_some_and(|(sample, previous)| {
+                                    sample.crossing_since(previous).is_some()
+                                }))
+                })
+                .filter(|entry| {
                     self.previous_laps
                         .get(&entry.car_idx)
                         .is_some_and(|&laps| laps == leader_before)
@@ -153,18 +310,13 @@ impl RaceTiming {
                 .max()
                 .unwrap_or(leader_laps);
 
-            // `CoolDown` is the backstop: a race can be ended from the black box or by the
-            // host with nobody crossing the line at all.
-            let checkered_is_out = matches!(session.state, Some(SessionState::CoolDown))
-                || (matches!(session.state, Some(SessionState::Checkered))
-                    && leader_crossing_observed);
-            let race_has_ended = matches!(session.state, Some(SessionState::CoolDown));
-
-            let flag_crossing =
-                checkered_is_out && !race_has_ended && self.laps_at_checkered.is_none();
+            // Attaching under the flag cannot tell a racing lap from the winner's rollout.
+            let flag_crossing = self.observed_before_checkered
+                && leader_crossing_observed
+                && self.laps_at_checkered.is_none();
             finish_flag_armed_this_tick = flag_crossing;
 
-            if checkered_is_out && self.laps_at_checkered.is_none() {
+            if flag_crossing {
                 // The leader needs no special case: on the tick it crosses, the previous
                 // tick still holds the lap it was on, so the same comparison that latches
                 // everyone behind latches the leader too.
@@ -175,6 +327,13 @@ impl RaceTiming {
 
             let mut crossing_times = HashMap::new();
             for entry in entries.iter() {
+                if self
+                    .cars
+                    .get(&entry.car_idx)
+                    .is_some_and(|car| car.finished)
+                {
+                    continue;
+                }
                 let Some(sample) = finish_sample(entry, car_idx, session.time) else {
                     continue;
                 };
@@ -216,6 +375,21 @@ impl RaceTiming {
             let state = &mut *self;
 
             for entry in entries.iter_mut() {
+                let result = results_positions_map.get(&entry.car_idx).copied();
+                let car = state.cars.entry(entry.car_idx).or_default();
+                car.disqualified |= entry.raw_flags & DISQUALIFY != 0;
+                if session.results_official {
+                    if let Some(result) = result {
+                        apply_official_outcome(car, entry, result, state.tick);
+                    }
+                }
+                if car.finished || entry.race_outcome.is_some() {
+                    apply_finish_snapshot(car, entry, result);
+                    state.towed_cars.remove(&entry.car_idx);
+                    state.tow_finish_baselines.remove(&entry.car_idx);
+                    continue;
+                }
+
                 let completed = completed_laps_for_finish(entry, state);
                 let baseline_before_crossing = state
                     .laps_at_checkered
@@ -227,9 +401,7 @@ impl RaceTiming {
                     .get(entry.car_idx as usize)
                     .copied()
                     .filter(|laps| *laps >= 0);
-                let result_completed = results_positions_map
-                    .get(&entry.car_idx)
-                    .and_then(|result| result.laps_complete);
+                let result_completed = result.and_then(|result| result.laps_complete);
                 let results_advanced = result_completed.is_some_and(|laps| {
                     laps > state
                         .previous_result_laps
@@ -239,11 +411,15 @@ impl RaceTiming {
                 });
 
                 // Seed a late arrival from its first observed lap.
-                let crossed_the_line = state.laps_at_checkered.as_mut().is_some_and(|laps| {
-                    let baseline = laps.entry(entry.car_idx).or_insert(completed);
+                // The last live crossing can share the sample that enters CoolDown.
+                let crossing_window = under_checkered
+                    || (entering_cooldown && crossing_times.contains_key(&entry.car_idx));
+                let crossed_the_line = crossing_window
+                    && state.laps_at_checkered.as_mut().is_some_and(|laps| {
+                        let baseline = laps.entry(entry.car_idx).or_insert(completed);
 
-                    completed > *baseline
-                });
+                        completed > *baseline
+                    });
                 let crossed_on_live_telemetry = crossed_the_line
                     && baseline_before_crossing
                         .is_some_and(|baseline| live_completed.is_some_and(|laps| laps > baseline));
@@ -261,20 +437,6 @@ impl RaceTiming {
                 let crossing_evidence = crossed_on_live_telemetry
                     || crossed_on_results_while_in_world
                     || (crossed_the_line && observed_wraps.contains(&entry.car_idx));
-
-                let car = state.cars.entry(entry.car_idx).or_default();
-                // A results-only zero completed laps maps to lap one, even for a car
-                // that never started. Preserve the cooldown rule for a live lap one.
-                let live_lap = car_idx.car_idx_lap.get(entry.car_idx as usize).copied();
-                if is_racing(entry) && live_lap.is_some_and(|lap| lap >= 1) {
-                    car.started = true;
-                }
-
-                let started = entry.lap > 1
-                    || live_lap == Some(1)
-                    || car.last_in_world_laps.is_some_and(|laps| laps > 0)
-                    || car.started;
-                let classified = race_has_ended && !entry.is_retired && started;
 
                 let crossing_time = crossing_times.get(&entry.car_idx).copied();
                 // With partial evidence, an untimed leader may have crossed earlier.
@@ -295,53 +457,28 @@ impl RaceTiming {
                     && !crossed_before_flag
                     && !crossing_order_unknown;
 
-                if crossing_evidence && !entry.is_retired && !car.finished {
+                if crossing_evidence && !entry.is_retired {
                     if !finisher_crossed {
                         if let Some(laps) = state.laps_at_checkered.as_mut() {
                             laps.insert(entry.car_idx, completed);
                         }
                     } else {
-                        car.finish_timing = Some(FinishTiming {
-                            laps_completed: completed,
-                            crossing_time,
-                            official_gap: None,
-                        });
+                        let car = state.cars.entry(entry.car_idx).or_default();
+                        record_finish(
+                            car,
+                            entry,
+                            FinishTiming {
+                                laps_completed: completed,
+                                crossing_time,
+                                official_gap: None,
+                            },
+                            state.tick,
+                        );
+                        apply_finish_snapshot(car, entry, result);
+                        state.towed_cars.remove(&entry.car_idx);
+                        state.tow_finish_baselines.remove(&entry.car_idx);
                     }
                 }
-
-                if let Some((result, laps_completed)) = session
-                    .results_official
-                    .then(|| results_positions_map.get(&entry.car_idx))
-                    .flatten()
-                    .and_then(|result| {
-                        Some((result, result.laps_complete.filter(|laps| *laps > 0)?))
-                    })
-                {
-                    let crossing_time = car
-                        .finish_timing
-                        .filter(|timing| timing.laps_completed == laps_completed)
-                        .and_then(|timing| timing.crossing_time);
-                    car.finish_timing = Some(FinishTiming {
-                        laps_completed,
-                        crossing_time,
-                        official_gap: result.time.filter(|time| time.is_finite() && *time >= 0.0),
-                    });
-                }
-
-                entry.finish_timing = car.finish_timing;
-
-                if finisher_crossed || classified {
-                    if crossed_on_live_telemetry {
-                        car.last_in_world_laps = Some(completed);
-                    }
-
-                    car.finished = true;
-                    state.towed_cars.remove(&entry.car_idx);
-                    state.tow_finish_baselines.remove(&entry.car_idx);
-                    entry.is_towed = false;
-                }
-
-                entry.is_finished = car.finished;
             }
 
             state.previous_finish_samples = finish_samples;

@@ -1077,6 +1077,7 @@ mod tests {
             results_position_lap: None,
             results_position_time: None,
             finish_timing: None,
+            race_outcome: None,
             is_retired: false,
             is_finished: false,
             is_towed: false,

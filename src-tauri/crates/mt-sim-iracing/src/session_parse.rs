@@ -159,6 +159,10 @@ pub fn parse_session(yaml: &str) -> Option<ParsedSession> {
                             last_time: raw_pos.last_time.filter(|t| t.is_finite() && *t > 0.0),
                             laps_complete: raw_pos.laps_complete,
                             reason_out_id: raw_pos.reason_out_id,
+                            reason_out_str: raw_pos
+                                .reason_out_id
+                                .filter(|&reason| reason != 0)
+                                .and(raw_pos.reason_out_str),
                         })
                     })
                     .collect(),
@@ -455,6 +459,7 @@ struct RawResultPosition {
     last_time: Option<f32>,
     laps_complete: Option<i32>,
     reason_out_id: Option<i32>,
+    reason_out_str: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -604,11 +609,15 @@ SessionInfo:
      ClassPosition: 0
      Lap: 5
      Time: 83.123
+     ReasonOutId: 1
+     ReasonOutStr: Disqualified
    - Position: 2
      CarIdx: 3
      ClassPosition: 1
      Lap: 5
      Time: 84.456
+     ReasonOutId: 0
+     ReasonOutStr: Running
 DriverInfo:
  DriverCarIdx: 3
  DriverCarFuelMaxLtr: 45.500
@@ -715,6 +724,16 @@ QualifyResultsInfo:
         assert_eq!(snapshot.sessions[1].results_official, Some(true));
         assert_eq!(snapshot.sessions[1].results_positions.len(), 2);
         assert_eq!(snapshot.sessions[1].results_positions[0].car_idx, 7);
+        assert_eq!(
+            snapshot.sessions[1].results_positions[0]
+                .reason_out_str
+                .as_deref(),
+            Some("Disqualified")
+        );
+        assert_eq!(
+            snapshot.sessions[1].results_positions[1].reason_out_str,
+            None
+        );
         assert_eq!(snapshot.player_car_idx, 3);
         assert_eq!(snapshot.fuel_capacity_ltr, Some(45.5 * 0.6));
         assert_eq!(snapshot.driver_car_red_line, Some(7200.0));

@@ -90,6 +90,10 @@ export class StandingsOrderStore {
     return this.pending.size > 0;
   }
 
+  holdRanks() {
+    this.pending.clear();
+  }
+
   /** A motion-only frame can finish a pass without scanning the field again. */
   process(entries: CarIdentity[] | null, useTrackOrder: boolean, now: number) {
     if (entries) {

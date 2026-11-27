@@ -22,7 +22,7 @@ describe('resolveDriverStatuses', () => {
   it('lets a disqualification hide every other status', () => {
     expect(
       statusesOf({ flagType: 'dq', isTowed: true, isPit: true, isOut: true })
-    ).toEqual(['dnf']);
+    ).toEqual(['dq']);
   });
 
   it('shows the tow alone while the car stands in its stall', () => {

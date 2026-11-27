@@ -177,6 +177,7 @@ export const DriverRow = observer(
       isSessionEnded: session.isSessionEnded,
       isGridding: session.isRaceGridding,
       isPlayerTowing: player.isTowing,
+      requireConfirmedFinish: session.currentSessionType === 'Race',
     });
     const isPit = state.isPit;
 

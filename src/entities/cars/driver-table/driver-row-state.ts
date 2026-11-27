@@ -13,6 +13,7 @@ export interface DriverRowState {
   isTowed: boolean;
   isOffTrack: boolean;
   isFinished: boolean;
+  raceOutcome?: NonNullable<CarIdentity['raceOutcome']>;
   flagType: FlagType;
 }
 
@@ -23,6 +24,8 @@ export interface DriverRowContext {
   isGridding: boolean;
   /** The player's tow is counting down — the car sits in the stall, towed, not stopped. */
   isPlayerTowing: boolean;
+  /** A race's checkered badge comes from the per-car finish observation. */
+  requireConfirmedFinish?: boolean;
 }
 
 /**
@@ -30,9 +33,8 @@ export interface DriverRowContext {
  * way.
  *
  * Finishing is latched in the backend once the car crosses the line under the
- * checkered flag, so it outlives the drive back to the garage, and it outranks
- * retirement: a driver who takes the flag and then quits is reported with a
- * reason-out, but what he did was finish. A towed car left the world without
+ * checkered flag, so it outlives the drive back to the garage. Official DNF
+ * and DQ take precedence. A towed car left the world without
  * going through the pit lane, which OUT alone would not tell apart from a
  * garage exit.
  */
@@ -40,7 +42,9 @@ export const driverRowStateOf = (
   driver: CarIdentity,
   context: DriverRowContext
 ): DriverRowState => {
-  const isFinished = driver.isFinished;
+  const raceOutcome = driver.raceOutcome ?? undefined;
+  const isFinished = driver.isFinished && !raceOutcome;
+  const rawFlag = parseDriverFlags(driver.rawFlags);
   const isInGarage = driver.trackSurface === 'NotInWorld';
   const isOut =
     !isFinished &&
@@ -49,14 +53,22 @@ export const driverRowStateOf = (
 
   return {
     isFinished,
+    raceOutcome,
     isOut,
     isPit:
+      !isFinished &&
       !isOut &&
       (driver.trackSurface === TRACK_SURFACE_IN_PIT_STALL || driver.onPitRoad),
     isTowed:
       (driver.isTowed || (driver.isPlayer && context.isPlayerTowing)) &&
       !isFinished,
     isOffTrack: !isOut && driver.trackSurface === TRACK_SURFACE_OFF_TRACK,
-    flagType: parseDriverFlags(driver.rawFlags),
+    flagType:
+      raceOutcome === 'dq'
+        ? 'dq'
+        : raceOutcome === 'dnf' ||
+            (rawFlag === 'checkered' && context.requireConfirmedFinish)
+          ? 'none'
+          : rawFlag,
   };
 };

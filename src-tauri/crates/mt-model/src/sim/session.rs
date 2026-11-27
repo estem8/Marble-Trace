@@ -186,6 +186,8 @@ pub struct ResultPosition {
     pub laps_complete: Option<i32>,
     /// 0 while the car is still running; non-zero once the sim marks it retired/DQ'd.
     pub reason_out_id: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_out_str: Option<String>,
 }
 
 #[cfg_attr(feature = "dev", derive(specta::Type))]

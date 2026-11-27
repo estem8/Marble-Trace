@@ -36,6 +36,7 @@ fn entry() -> DriverEntry {
         results_position_lap: None,
         results_position_time: None,
         finish_timing: None,
+        race_outcome: None,
         is_retired: false,
         is_finished: false,
         is_towed: false,
@@ -59,6 +60,7 @@ fn the_players_entry_outlives_the_ticks_without_a_driver_table() {
         driver_entries: Some(DriverEntriesFrame {
             entries: vec![entry(), player],
             player_car_idx: 0,
+            standings_order: None,
             pit_lane_loss_s: None,
             pit_exit_loss_s: None,
         }),

@@ -38,9 +38,9 @@ pub struct CarSpeedTracker {
 }
 
 impl CarSpeedTracker {
-    pub fn apply(
+    pub fn apply<'a>(
         &mut self,
-        entries: &mut [DriverEntry],
+        entries: impl IntoIterator<Item = &'a mut DriverEntry>,
         session_time: Option<f64>,
         track_length_m: f32,
         player_speed: f32,
@@ -53,7 +53,7 @@ impl CarSpeedTracker {
             return;
         }
 
-        for entry in entries.iter_mut() {
+        for entry in entries {
             if entry.is_player {
                 entry.speed = Some(player_speed.max(0.0));
 

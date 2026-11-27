@@ -10,6 +10,7 @@ export type DriverStatus =
   | 'out'
   | 'off_track'
   | 'dnf'
+  | 'dq'
   | 'tow';
 
 /** One status as a row draws it: a StatChip's lead and tone. */
@@ -23,6 +24,7 @@ export interface DriverStatusChip {
 // quieter than the position, the number and the name it sits beside.
 const CHIP_BY_STATUS: Record<DriverStatus, Omit<DriverStatusChip, 'status'>> = {
   dnf: { label: 'DNF', tone: 'danger' },
+  dq: { label: 'DQ', tone: 'danger' },
   pit_in: { label: 'IN', tone: 'info' },
   pit_exit: { label: 'OUT', tone: 'accent' },
   tow: { label: 'TOW', tone: 'lapped' },
@@ -43,6 +45,7 @@ export interface DriverStatusState {
    * out, off-track or in the pits — where it parked afterwards says nothing.
    */
   isFinished?: boolean;
+  raceOutcome?: 'dnf' | 'dq';
   /** The table's "pit indicator" setting. */
   showPit?: boolean;
 }
@@ -70,10 +73,15 @@ export const resolveDriverStatuses = ({
   isPit,
   pitState,
   isFinished = false,
+  raceOutcome,
   showPit = true,
 }: DriverStatusState): DriverStatusChip[] => {
+  if (raceOutcome) {
+    return [chipOf(raceOutcome)];
+  }
+
   if (flagType === 'dq') {
-    return [chipOf('dnf')];
+    return [chipOf('dq')];
   }
 
   const statuses: DriverStatusChip[] = [];

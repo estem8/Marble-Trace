@@ -83,9 +83,9 @@ pub struct PitLaneLoss {
 
 impl PitTimingTracker {
     /// Fills the per-car pit fields and returns what the lane costs.
-    pub fn apply(
+    pub fn apply<'a>(
         &mut self,
-        entries: &mut [DriverEntry],
+        entries: impl IntoIterator<Item = &'a mut DriverEntry>,
         session_time: Option<f64>,
         session_num: Option<i32>,
     ) -> PitLaneLoss {
@@ -99,7 +99,7 @@ impl PitTimingTracker {
         }
 
         if let Some(now) = session_time {
-            for entry in entries.iter_mut() {
+            for entry in entries {
                 self.track(entry, now);
             }
         }

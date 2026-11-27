@@ -77,15 +77,29 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
             this.root.backendComputed.driverEntries,
             this.root.backendComputed.driverIdentities,
           ] as const,
-        ([, entries], previous) => {
+        ([frame, entries], previous) => {
           const identitiesChanged = entries !== previous?.[1];
+          const mode = frame?.standingsOrder;
+          const previousMode = previous?.[0]?.standingsOrder;
+          const orderChanged = identitiesChanged || mode !== previousMode;
 
-          if (!identitiesChanged && !this.order.hasPending()) {
+          if (mode === 'hold') {
+            this.order.holdRanks();
+            return;
+          }
+
+          if ((mode === 'results' || mode === 'officialGrid') && orderChanged) {
+            this.order.reset();
+            this.order.process(entries, this.useTrackOrder, performance.now());
+            return;
+          }
+
+          if (!orderChanged && !this.order.hasPending()) {
             return;
           }
 
           this.order.process(
-            identitiesChanged ? entries : null,
+            orderChanged ? entries : null,
             this.useTrackOrder,
             performance.now()
           );
@@ -147,8 +161,11 @@ export class StandingsWidgetStore implements StandingsHotkeyTarget {
   }
 
   get useLiveTiming(): boolean {
+    const order = this.root.backendComputed.driverEntries?.standingsOrder;
+
     return (
       this.useTrackOrder &&
+      (order == null || order === 'track') &&
       hasRaceStarted(this.root.session.session?.session_state ?? null)
     );
   }

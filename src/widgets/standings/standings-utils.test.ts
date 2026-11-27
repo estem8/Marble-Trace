@@ -423,7 +423,7 @@ describe('getStandingsGap', () => {
     });
   });
 
-  it('uses a provisional results gap without two comparable finish times', () => {
+  it('omits the gap without two comparable finish times', () => {
     const driver = makeGapEntry({
       resultsPositionLap: 0,
       resultsPositionTime: 5,
@@ -438,12 +438,11 @@ describe('getStandingsGap', () => {
     expect(
       getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
     ).toEqual({
-      kind: 'seconds',
-      seconds: expect.closeTo(4.0, 5),
+      kind: 'empty',
     });
   });
 
-  it('uses provisional results instead of post-finish live progress', () => {
+  it('ignores provisional results and post-finish progress', () => {
     const driver = makeGapEntry({
       lap: 41,
       lapDistPct: 0.5,
@@ -472,9 +471,22 @@ describe('getStandingsGap', () => {
     expect(
       getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
     ).toEqual({
-      kind: 'seconds',
-      seconds: expect.closeTo(4.0, 5),
+      kind: 'empty',
     });
+  });
+
+  it('omits the gap when only one car has finished', () => {
+    const driver = makeGapEntry({ lap: 20, lapDistPct: 0.8, f2Time: 12 });
+    const reference = makeGapEntry({
+      isFinished: true,
+      lap: 21,
+      lapDistPct: 0.9,
+      f2Time: 0,
+    });
+
+    expect(
+      getStandingsGap(driver, reference, { isRace: true, useLiveTiming: true })
+    ).toEqual({ kind: 'empty' });
   });
 
   it('does not use a live lap deficit after both cars finish on the same lap', () => {
